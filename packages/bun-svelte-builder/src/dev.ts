@@ -135,36 +135,109 @@ export const shouldProcessDevWatchEvent = (
     return true;
 };
 
-const compileChangedDevAsset = async (rootDir: string, modulePath: string): Promise<void> => {
+type DevCompileCacheEntry = {
+    contents: string;
+    mtimeMs: number;
+};
+
+export type DevCompileCache = {
+    invalidate: (modulePath: string) => void;
+    read: (modulePath: string, mtimeMs: number) => string | undefined;
+    write: (modulePath: string, mtimeMs: number, contents: string) => void;
+};
+
+export const createDevCompileCache = (): DevCompileCache => {
+    const entries = new Map<string, DevCompileCacheEntry>();
+
+    return {
+        invalidate: (modulePath) => {
+            entries.delete(modulePath);
+        },
+        read: (modulePath, mtimeMs) => {
+            const entry = entries.get(modulePath);
+            if (entry === undefined || entry.mtimeMs !== mtimeMs) {
+                return undefined;
+            }
+
+            return entry.contents;
+        },
+        write: (modulePath, mtimeMs, contents) => {
+            entries.set(modulePath, { contents, mtimeMs });
+        },
+    };
+};
+
+const getDevModuleMtime = (rootDir: string, modulePath: string): Result<number> => {
+    try {
+        return ok(statSync(join(rootDir, modulePath)).mtimeMs);
+    } catch (error) {
+        return fail(`Missing file: ${join(rootDir, modulePath)} (${getErrorMessage(error)})`);
+    }
+};
+
+const loadDevModule = async (
+    rootDir: string,
+    modulePath: string,
+    cache: DevCompileCache,
+    shouldLog = false,
+): Promise<Result<string>> => {
+    const mtime = getDevModuleMtime(rootDir, modulePath);
+    if (!mtime.ok) {
+        return mtime;
+    }
+
+    const cached = cache.read(modulePath, mtime.value);
+    if (cached !== undefined) {
+        return ok(cached);
+    }
+
     if (modulePath.endsWith(".svelte")) {
-        const compiled = await compileSvelteForDev(rootDir, modulePath, true);
+        const compiled = await compileSvelteForDev(rootDir, modulePath, shouldLog);
         if (!compiled.ok) {
-            console.error(compiled.error);
+            return compiled;
         }
 
-        return;
+        cache.write(modulePath, mtime.value, compiled.value);
+        return compiled;
     }
 
     if (modulePath.endsWith(".js")) {
-        const compiled = await loadRequiredText(join(rootDir, modulePath));
-        if (!compiled.ok) {
-            console.error(compiled.error);
-            return;
+        const source = await loadRequiredText(join(rootDir, modulePath));
+        if (!source.ok) {
+            return source;
         }
 
-        logRecompiledAsset(modulePath, compiled.value);
-        return;
+        if (shouldLog) {
+            logRecompiledAsset(modulePath, source.value);
+        }
+
+        cache.write(modulePath, mtime.value, source.value);
+        return source;
     }
 
     if (modulePath.endsWith(".ts")) {
-        const transpiled = await transpileTypeScriptForDev(rootDir, modulePath, true);
+        const transpiled = await transpileTypeScriptForDev(rootDir, modulePath, shouldLog);
         if (!transpiled.ok) {
-            console.error(transpiled.error);
+            return transpiled;
         }
+
+        cache.write(modulePath, mtime.value, transpiled.value);
+        return transpiled;
+    }
+
+    return fail(`Unsupported dev module: ${modulePath}`);
+};
+
+const compileChangedDevAsset = async (rootDir: string, modulePath: string, cache: DevCompileCache): Promise<void> => {
+    cache.invalidate(modulePath);
+    const compiled = await loadDevModule(rootDir, modulePath, cache, true);
+    if (!compiled.ok) {
+        console.error(compiled.error);
     }
 };
 
 type DevReloadHub = {
+    cache: DevCompileCache;
     stop: () => void;
     subscribe: (listener: (data: string) => void) => () => void;
 };
@@ -174,6 +247,7 @@ const createDevReloadHub = (watchDir: string): DevReloadHub => {
     const listeners = new Set<(data: string) => void>();
     const recentEvents = new Map<string, number>();
     const watchedDirs = new Set<string>();
+    const cache = createDevCompileCache();
 
     const stop = (): void => {
         watchers.forEach((watcher) => watcher.close());
@@ -224,7 +298,7 @@ const createDevReloadHub = (watchDir: string): DevReloadHub => {
                         }
 
                         notify("reload");
-                        void compileChangedDevAsset(watchDir, relativePath);
+                        void compileChangedDevAsset(watchDir, relativePath, cache);
                     } catch (error) {
                         reportDevWatcherIssue(`watch event for ${join(dir, filename)}`, error);
                     }
@@ -246,6 +320,7 @@ const createDevReloadHub = (watchDir: string): DevReloadHub => {
     watchRecursive(watchDir);
 
     return {
+        cache,
         stop,
         subscribe: (listener) => {
             listeners.add(listener);
@@ -632,7 +707,7 @@ export const runConfiguredDevServer = async (cwd = process.cwd()): Promise<Resul
                     return new Response("Not Found", { status: 404 });
                 }
 
-                const transpiled = await transpileTypeScriptForDev(rootDir, resolvedSourcePath.value.modulePath);
+                const transpiled = await loadDevModule(rootDir, resolvedSourcePath.value.modulePath, reloadHub.cache);
                 if (!transpiled.ok) {
                     return transpiled.error.startsWith("Missing file:")
                         ? createNotFoundResponse()
@@ -650,7 +725,7 @@ export const runConfiguredDevServer = async (cwd = process.cwd()): Promise<Resul
                     return new Response("Not Found", { status: 404 });
                 }
 
-                const source = await loadRequiredText(resolvedSourcePath.value.filePath);
+                const source = await loadDevModule(rootDir, resolvedSourcePath.value.modulePath, reloadHub.cache);
                 if (!source.ok) {
                     return source.error.startsWith("Missing file:") ? createNotFoundResponse() : new Response(source.error, { status: 500 });
                 }
@@ -666,7 +741,7 @@ export const runConfiguredDevServer = async (cwd = process.cwd()): Promise<Resul
                     return new Response("Not Found", { status: 404 });
                 }
 
-                const compiled = await compileSvelteForDev(rootDir, resolvedSourcePath.value.modulePath);
+                const compiled = await loadDevModule(rootDir, resolvedSourcePath.value.modulePath, reloadHub.cache);
                 if (!compiled.ok) {
                     return compiled.error.startsWith("Missing file:") ? createNotFoundResponse() : new Response(compiled.error, { status: 500 });
                 }

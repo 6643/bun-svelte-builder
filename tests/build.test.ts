@@ -384,6 +384,22 @@ test("dev watcher dedupes repeated events for the same file within the debounce 
     expect(shouldProcessDevWatchEvent(recentEvents, "src/App.svelte", 1200)).toBe(true);
 });
 
+test("dev compile cache reuses unchanged output and invalidates updated modules", async () => {
+    const { createDevCompileCache } = await import("../packages/bun-svelte-builder/src/dev.ts");
+
+    const cache = createDevCompileCache();
+
+    expect(cache.read("src/App.svelte", 1000)).toBeUndefined();
+
+    cache.write("src/App.svelte", 1000, "compiled-once");
+
+    expect(cache.read("src/App.svelte", 1000)).toBe("compiled-once");
+    expect(cache.read("src/App.svelte", 1001)).toBeUndefined();
+
+    cache.invalidate("src/App.svelte");
+    expect(cache.read("src/App.svelte", 1000)).toBeUndefined();
+});
+
 test("dev watcher surfaces non-trivial errors and ignores transient missing-file races", async () => {
     const { formatDevWatcherIssue } = await import("../packages/bun-svelte-builder/src/dev.ts");
 
