@@ -21,7 +21,7 @@ import { request } from "node:http";
 import type { BuildSvelteOptions } from "../src/build";
 
 const createdDirs: string[] = [];
-const EXAMPLE_ROOT = join(process.cwd(), "examples");
+const EXAMPLE_ROOT = join(process.cwd(), "demo");
 const EXAMPLE_SRC = join(EXAMPLE_ROOT, "src");
 const EXAMPLE_ASSETS = join(EXAMPLE_ROOT, "assets");
 let devTestChain: Promise<void> = Promise.resolve();
@@ -370,8 +370,10 @@ test("bootstrap module source defaults appComponent and mounts to the configured
 
     expect(defaultSource).toContain('import App from "./src/App.svelte"');
     expect(defaultSource).toContain('document.getElementById("app")');
+    expect(defaultSource).not.toContain(')!');
     expect(customSource).toContain('import App from "src/Custom.svelte"');
     expect(customSource).toContain('document.getElementById("root")');
+    expect(customSource).not.toContain(')!');
 });
 
 test("dev watcher dedupes repeated events for the same file within the debounce window", async () => {
@@ -507,11 +509,11 @@ test("package entry exports buildSvelte for reusable builds", async () => {
     expect(outputFiles).toContain("index.html");
 });
 
-test("root scripts expose check commands and examples are documented as repo-local dogfood", () => {
+test("root scripts expose check commands and demo is documented as repo-local dogfood", () => {
     const rootPackageJson = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as {
         scripts?: Record<string, string>;
     };
-    const examplePackageJson = JSON.parse(readFileSync(join(process.cwd(), "examples", "package.json"), "utf8")) as {
+    const examplePackageJson = JSON.parse(readFileSync(join(process.cwd(), "demo", "package.json"), "utf8")) as {
         dependencies?: Record<string, string>;
         scripts?: Record<string, string>;
     };
@@ -523,7 +525,7 @@ test("root scripts expose check commands and examples are documented as repo-loc
     expect(examplePackageJson.dependencies?.["bun-svelte-builder"]).toBe("github:6643/bun-svelte-builder");
     expect(examplePackageJson.scripts?.build).toBe("bun ./node_modules/bun-svelte-builder/src/cli.ts build");
     expect(examplePackageJson.scripts?.dev).toBe("bun ./node_modules/bun-svelte-builder/src/cli.ts dev");
-    expect(rootReadme).toContain("`examples` 是仓库内 dogfood 示例");
+    expect(rootReadme).toContain("`demo` 是仓库内 dogfood 示例");
     expect(rootReadme).toContain("不作为发布包消费者模板");
 });
 
@@ -582,7 +584,7 @@ test("tsconfig excludes generated dist directories from typechecking", () => {
 
     expect(tsconfigSource).toContain('"exclude"');
     expect(tsconfigSource).toContain('"dist"');
-    expect(tsconfigSource).toContain('"examples/dist"');
+    expect(tsconfigSource).toContain('"demo/dist"');
 });
 
 test("buildProduction can emit inline sourcemaps when enabled in code", async () => {
@@ -1704,6 +1706,7 @@ test("runConfiguredDevServer serves a generated bootstrap module without main.ts
     expect(response.ok).toBe(true);
     expect(source).toContain('import App from "./src/Alt.svelte"');
     expect(source).toContain('document.getElementById("root")');
+    expect(source).not.toContain(')!');
     }));
 
 test("runConfiguredDevServer logs a recompiled asset report for changed components", async () =>
