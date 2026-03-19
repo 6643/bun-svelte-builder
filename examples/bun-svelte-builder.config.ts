@@ -1,4 +1,4 @@
-import { defineSvelteConfig } from "bun-svelte-builder";
+import { defineSvelteConfig } from "../packages/bun-svelte-builder/src/index.ts";
 
 export default defineSvelteConfig({
     appComponent: "src/App.svelte",

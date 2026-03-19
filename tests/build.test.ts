@@ -511,14 +511,43 @@ test("workspace scripts use the published CLI entry and expose check commands", 
         scripts?: Record<string, string>;
     };
     const examplePackageJson = JSON.parse(readFileSync(join(process.cwd(), "examples", "package.json"), "utf8")) as {
+        dependencies?: Record<string, string>;
         scripts?: Record<string, string>;
     };
 
     expect(rootPackageJson.scripts?.typecheck).toBeDefined();
     expect(rootPackageJson.scripts?.check).toContain("bun run typecheck");
     expect(rootPackageJson.scripts?.check).toContain("bun test");
-    expect(examplePackageJson.scripts?.build).toBe("bun-svelte-builder build");
-    expect(examplePackageJson.scripts?.dev).toBe("bun-svelte-builder dev");
+    expect(examplePackageJson.dependencies?.["bun-svelte-builder"]).toBeUndefined();
+    expect(examplePackageJson.scripts?.build).toBe("bun ../packages/bun-svelte-builder/src/cli.ts build");
+    expect(examplePackageJson.scripts?.dev).toBe("bun ../packages/bun-svelte-builder/src/cli.ts dev");
+});
+
+test("repository root package exposes publish metadata and README positions it as the primary entry", () => {
+    const rootPackageJson = JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as {
+        name?: string;
+        bin?: Record<string, string>;
+        exports?: Record<string, string>;
+        files?: string[];
+        scripts?: Record<string, string>;
+    };
+    const rootReadme = readFileSync(join(process.cwd(), "README.md"), "utf8");
+
+    expect(rootPackageJson.name).toBe("bun-svelte-builder");
+    expect(rootPackageJson.bin).toEqual({
+        "bun-svelte-builder": "./packages/bun-svelte-builder/src/cli.ts",
+    });
+    expect(rootPackageJson.exports?.["."]).toBe("./packages/bun-svelte-builder/src/index.ts");
+    expect(rootPackageJson.files).toEqual(["packages/bun-svelte-builder/src", "README.md", "package.json"]);
+    expect(rootPackageJson.scripts).toEqual({
+        build: "bun run build.ts",
+        check: "bun run typecheck && bun test",
+        dev: "bun --hot server.ts",
+        test: "bun test",
+        typecheck: "tsc -p tsconfig.json --noEmit",
+    });
+    expect(rootReadme).toContain("# bun-svelte-builder");
+    expect(rootReadme).not.toContain("`packages/bun-svelte-builder` 是可复用的 Bun + Svelte 5 生产构建预设。");
 });
 
 test("buildProduction can emit inline sourcemaps when enabled in code", async () => {

@@ -1,20 +1,31 @@
 {
-    "name": "svelte5-bun-demo",
-    "module": "index.ts",
+    "name": "bun-svelte-builder",
+    "bin": {
+        "bun-svelte-builder": "./packages/bun-svelte-builder/src/cli.ts"
+    },
+    "version": "0.0.0",
+    "module": "./packages/bun-svelte-builder/src/index.ts",
     "type": "module",
-    "private": true,
+    "exports": {
+        ".": "./packages/bun-svelte-builder/src/index.ts",
+        "./runtime": "./packages/bun-svelte-builder/src/runtime.ts",
+        "./build": "./packages/bun-svelte-builder/src/build.ts",
+        "./package.json": "./package.json"
+    },
+    "files": [
+        "packages/bun-svelte-builder/src",
+        "README.md",
+        "package.json"
+    ],
     "workspaces": [
-        "packages/*",
         "examples"
     ],
-    "dependencies": {
-        "bun-svelte-builder": "workspace:*"
-    },
     "devDependencies": {
         "@types/bun": "latest",
         "svelte": "next"
     },
     "peerDependencies": {
+        "svelte": "next",
         "typescript": "^5.9.3"
     },
     "scripts": {

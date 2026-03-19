@@ -1,6 +1,8 @@
-# svelte5-bun-demo
+# bun-svelte-builder
 
-`packages/bun-svelte-builder` 是可复用的 Bun + Svelte 5 生产构建预设。
+`bun-svelte-builder` 是这个仓库当前的主包入口。
+
+当前迁移阶段仍然保留 `packages/bun-svelte-builder/src` 作为源码位置, 但安装、导入和发布都以仓库根目录为准。
 
 `examples` 是演示如何消费该预设的独立 workspace 示例包, 目录内保留业务源码与配置, 当前包含 `src/`、`assets/`、`bun-svelte-builder.config.ts` 和 `package.json`。入口由构建器根据 `appComponent` 自动生成, 不再需要手写 `main.ts`。
 
