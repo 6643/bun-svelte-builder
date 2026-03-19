@@ -520,7 +520,7 @@ test("root scripts expose check commands and examples are documented as repo-loc
     expect(rootPackageJson.scripts?.typecheck).toBeDefined();
     expect(rootPackageJson.scripts?.check).toContain("bun run typecheck");
     expect(rootPackageJson.scripts?.check).toContain("bun test");
-    expect(examplePackageJson.dependencies?.["bun-svelte-builder"]).toBe("..");
+    expect(examplePackageJson.dependencies?.["bun-svelte-builder"]).toBe("github:6643/bun-svelte-builder");
     expect(examplePackageJson.scripts?.build).toBe("bun ./node_modules/bun-svelte-builder/src/cli.ts build");
     expect(examplePackageJson.scripts?.dev).toBe("bun ./node_modules/bun-svelte-builder/src/cli.ts dev");
     expect(rootReadme).toContain("`examples` 是仓库内 dogfood 示例");
