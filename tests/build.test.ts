@@ -1751,6 +1751,49 @@ test("runConfiguredDevServer serves the built-in html shell and injects the impo
     expect(html).toContain('<script type="importmap">');
     }));
 
+test("runConfiguredDevServer serves the app shell for direct SPA route requests", async () =>
+    runSequentialDevTest(async () => {
+    const devPort = await allocateFreePort();
+    const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-dev-spa-route-"));
+    createdDirs.push(rootDir);
+
+    mkdirSync(join(rootDir, "src"), { recursive: true });
+    mkdirSync(join(rootDir, "assets"), { recursive: true });
+
+    writeFileSync(
+        join(rootDir, "src", "App.svelte"),
+        ["<h1>spa route shell</h1>"].join("\n"),
+    );
+
+    writeFileSync(
+        join(rootDir, "bun-svelte-builder.config.ts"),
+        [
+            'import { defineSvelteConfig } from "bun-svelte-builder";',
+            "",
+            "export default defineSvelteConfig({",
+            `    port: ${devPort},`,
+            "});",
+        ].join("\n"),
+    );
+
+    const { runConfiguredDevServer } = await import("../src/index.ts");
+    const result = await runConfiguredDevServer(rootDir);
+
+    if (!result.ok) {
+        throw new Error(result.error);
+    }
+
+    const response = await fetch(`http://127.0.0.1:${result.value.port}/user?id=0`);
+    const html = await response.text();
+
+    await result.value.stop();
+
+    expect(response.status).toBe(200);
+    expect(html).toContain('<main id="app"></main>');
+    expect(html).toContain('<script type="module" src="/main.ts"></script>');
+    expect(html).toContain('<script type="importmap">');
+    }));
+
 test("runConfiguredDevServer escapes appTitle in the dev html shell", async () =>
     runSequentialDevTest(async () => {
     const devPort = await allocateFreePort();
@@ -1848,6 +1891,93 @@ test("runConfiguredDevServer serves a generated bootstrap module without main.ts
     expect(source).toContain('import App from "./src/Alt.svelte"');
     expect(source).toContain('document.getElementById("root")');
     expect(source).not.toContain(')!');
+    }));
+
+test("runConfiguredDevServer rewrites bare package imports and compiles symlinked package source modules", async () =>
+    runSequentialDevTest(async () => {
+    const devPort = await allocateFreePort();
+    const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-dev-package-imports-"));
+    const packageRoot = mkdtempSync(join(process.cwd(), ".tmp-bsb-dev-package-imports-pkg-"));
+    createdDirs.push(rootDir, packageRoot);
+
+    mkdirSync(join(rootDir, "src"), { recursive: true });
+    mkdirSync(join(rootDir, "assets"), { recursive: true });
+    mkdirSync(join(rootDir, "node_modules"), { recursive: true });
+    mkdirSync(join(packageRoot, "src"), { recursive: true });
+    mkdirSync(join(rootDir, "node_modules", ".bun"), { recursive: true });
+
+    symlinkSync(join(process.cwd(), "node_modules", "svelte"), join(rootDir, "node_modules", "svelte"));
+    symlinkSync(packageRoot, join(rootDir, "node_modules", "demo-pkg"));
+
+    writeFileSync(
+        join(rootDir, "src", "App.svelte"),
+        [
+            "<script>",
+            '  import { Widget } from "demo-pkg";',
+            "</script>",
+            "",
+            "<Widget />",
+        ].join("\n"),
+    );
+
+    writeFileSync(
+        join(rootDir, "bun-svelte-builder.config.ts"),
+        [
+            'import { defineSvelteConfig } from "bun-svelte-builder";',
+            "",
+            "export default defineSvelteConfig({",
+            `    port: ${devPort},`,
+            "});",
+        ].join("\n"),
+    );
+
+    writeFileSync(
+        join(packageRoot, "package.json"),
+        [
+            "{",
+            '  "name": "demo-pkg",',
+            '  "type": "module",',
+            '  "exports": {',
+            '    ".": "./src/index.ts"',
+            "  }",
+            "}",
+        ].join("\n"),
+    );
+
+    writeFileSync(
+        join(packageRoot, "src", "index.ts"),
+        ['export { default as Widget } from "./Widget.svelte";'].join("\n"),
+    );
+
+    writeFileSync(
+        join(packageRoot, "src", "Widget.svelte"),
+        ["<h1>demo pkg</h1>"].join("\n"),
+    );
+
+    const { runConfiguredDevServer } = await import("../src/index.ts");
+    const result = await runConfiguredDevServer(rootDir);
+
+    if (!result.ok) {
+        throw new Error(result.error);
+    }
+
+    try {
+        const appResponse = await requestDevServerPath(result.value.port, "/src/App.svelte");
+        const entryResponse = await requestDevServerPath(result.value.port, "/_node_modules/demo-pkg/src/index.ts");
+        const widgetResponse = await requestDevServerPath(result.value.port, "/_node_modules/demo-pkg/src/Widget.svelte");
+
+        expect(appResponse.status).toBe(200);
+        expect(appResponse.body).toContain('from "/_node_modules/demo-pkg/src/index.ts"');
+
+        expect(entryResponse.status).toBe(200);
+        expect(entryResponse.body).toContain('export { default as Widget } from "./Widget.svelte";');
+
+        expect(widgetResponse.status).toBe(200);
+        expect(widgetResponse.body).toContain("demo pkg");
+        expect(widgetResponse.body).toContain("$.template(");
+    } finally {
+        await result.value.stop();
+    }
     }));
 
 test("runConfiguredDevServer rejects direct access to root-level config source files", async () =>

@@ -1,6 +1,7 @@
 import { randomInt } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, realpathSync, statSync, watch, type FSWatcher } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import { compile } from "svelte/compiler";
 import { createHtmlShell, type BuildSvelteOptions, type Result, loadSvelteConfig } from "./build";
@@ -20,6 +21,13 @@ export type DevWatchRoot = {
 
 const EXCLUDED_DIRS = ["node_modules", ".git", "dist"];
 const DEV_WATCH_DEBOUNCE_MS = 100;
+const DEV_SPECIAL_IMPORTS = {
+    "esm-env": "/_virtual/esm-env.js",
+    "svelte": "/_node_modules/svelte/src/index-client.js",
+    "svelte/internal": "/_node_modules/svelte/src/internal/index.js",
+    "svelte/internal/client": "/_node_modules/svelte/src/internal/client/index.js",
+    "svelte/internal/disclose-version": "/_node_modules/svelte/src/internal/disclose-version.js",
+} as const;
 const ok = <T>(value: T): Result<T> => ({ ok: true, value });
 
 const fail = (error: string): Result<never> => ({ ok: false, error });
@@ -47,6 +55,8 @@ const escapeHtml = (value: string): string =>
         .replaceAll("'", "&#39;");
 
 const createNotFoundResponse = (): Response => new Response("Not Found", { status: 404 });
+const normalizeModulePath = (value: string): string => value.replaceAll("\\", "/");
+const DEV_INTERNAL_PATH_PREFIXES = ["/_node_modules/", "/_virtual/", "/assets/"] as const;
 
 const createDevHtmlShell = (importMapScript: string, mountId: string, appTitle: string): string =>
     [
@@ -64,6 +74,31 @@ const createDevHtmlShell = (importMapScript: string, mountId: string, appTitle: 
         "</html>",
     ].join("\n");
 
+const shouldServeDevAppShell = (method: string, pathname: string, sourcePathPrefix: string | undefined): boolean => {
+    if (method !== "GET" && method !== "HEAD") {
+        return false;
+    }
+
+    if (pathname === "/") {
+        return false;
+    }
+
+    if (pathname === "/main.ts" || pathname === "/___live_reload" || pathname === "/_virtual/esm-env.js") {
+        return false;
+    }
+
+    if (DEV_INTERNAL_PATH_PREFIXES.some((prefix) => pathname.startsWith(prefix))) {
+        return false;
+    }
+
+    if (sourcePathPrefix !== undefined && pathname.startsWith(sourcePathPrefix)) {
+        return false;
+    }
+
+    const lastSegment = pathname.split("/").pop() ?? "";
+    return !lastSegment.includes(".");
+};
+
 const createRecompiledAssetReport = (modulePath: string, contents: string): string =>
     formatAssetReport(
         "Recompiled assets",
@@ -80,6 +115,102 @@ const createRecompiledAssetReport = (modulePath: string, contents: string): stri
 
 const logRecompiledAsset = (modulePath: string, contents: string): void => {
     console.log(createRecompiledAssetReport(modulePath, contents));
+};
+
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const isBareImportSpecifier = (specifier: string): boolean =>
+    !specifier.startsWith(".")
+    && !specifier.startsWith("/")
+    && !specifier.startsWith("data:")
+    && !specifier.startsWith("blob:")
+    && !specifier.startsWith("http:")
+    && !specifier.startsWith("https:");
+
+const getPackageNameFromSpecifier = (specifier: string): string => {
+    const segments = specifier.split("/");
+    if (segments[0]?.startsWith("@")) {
+        return segments.slice(0, 2).join("/");
+    }
+
+    return segments[0] ?? "";
+};
+
+const replaceImportSpecifier = (source: string, specifier: string, replacement: string): string => {
+    const escapedSpecifier = escapeRegExp(specifier);
+    const dynamicImportPattern = new RegExp(`\\bimport\\s*\\(\\s*(['"])${escapedSpecifier}\\1\\s*\\)`, "g");
+    const importFromPattern = new RegExp(`\\bfrom\\s+(['"])${escapedSpecifier}\\1`, "g");
+    const sideEffectImportPattern = new RegExp(`\\bimport\\s+(['"])${escapedSpecifier}\\1`, "g");
+
+    return source
+        .replace(dynamicImportPattern, (_, quote: string) => `import(${quote}${replacement}${quote})`)
+        .replace(importFromPattern, (_, quote: string) => `from ${quote}${replacement}${quote}`)
+        .replace(sideEffectImportPattern, (_, quote: string) => `import ${quote}${replacement}${quote}`);
+};
+
+const resolveBareImportPathForDev = async (specifier: string, importerPath: string): Promise<Result<string>> => {
+    const specialImport = DEV_SPECIAL_IMPORTS[specifier as keyof typeof DEV_SPECIAL_IMPORTS];
+    if (specialImport !== undefined) {
+        return ok(specialImport);
+    }
+
+    if (!isBareImportSpecifier(specifier)) {
+        return ok(specifier);
+    }
+
+    const packageName = getPackageNameFromSpecifier(specifier);
+    if (packageName.length === 0) {
+        return fail(`Unsupported bare import in ${importerPath}: ${specifier}`);
+    }
+
+    const importerUrl = pathToFileURL(importerPath).href;
+
+    return Promise.all([
+        import.meta.resolve(specifier, importerUrl),
+        import.meta.resolve(`${packageName}/package.json`, importerUrl),
+    ]).then(
+        ([resolvedUrl, packageJsonUrl]) => {
+            if (!resolvedUrl.startsWith("file://") || !packageJsonUrl.startsWith("file://")) {
+                return fail(`Unsupported resolved import for ${specifier}: ${resolvedUrl}`);
+            }
+
+            const resolvedPath = fileURLToPath(resolvedUrl);
+            const packageRoot = dirname(fileURLToPath(packageJsonUrl));
+            const relativePath = relative(packageRoot, resolvedPath);
+            if (relativePath.length === 0 || relativePath.startsWith("..") || isAbsolute(relativePath)) {
+                return fail(`Resolved import escaped package root for ${specifier}: ${resolvedPath}`);
+            }
+
+            return ok(`/_node_modules/${normalizeModulePath(packageName)}/${normalizeModulePath(relativePath)}`);
+        },
+        (error) => fail(`Failed to resolve ${specifier} from ${importerPath}: ${getErrorMessage(error)}`),
+    );
+};
+
+const jsImportScanner = new Bun.Transpiler({ loader: "js" });
+
+const rewriteBareImportsForDev = async (source: string, importerPath: string): Promise<Result<string>> => {
+    const specifiers = Array.from(
+        new Set(
+            jsImportScanner
+                .scanImports(source)
+                .map((record) => record.path)
+                .filter((specifier) => DEV_SPECIAL_IMPORTS[specifier as keyof typeof DEV_SPECIAL_IMPORTS] !== undefined || isBareImportSpecifier(specifier)),
+        ),
+    );
+
+    let rewritten = source;
+
+    for (const specifier of specifiers) {
+        const resolved = await resolveBareImportPathForDev(specifier, importerPath);
+        if (!resolved.ok) {
+            return resolved;
+        }
+
+        rewritten = replaceImportSpecifier(rewritten, specifier, resolved.value);
+    }
+
+    return ok(rewritten);
 };
 
 const isCompilableDevModule = (filePath: string): boolean =>
@@ -214,6 +345,36 @@ export const resolveDevWatchRoots = (rootDir: string, assetsDir: string | undefi
     return Array.from(roots.values()).sort((left, right) => Number(left.recursive) - Number(right.recursive) || left.path.localeCompare(right.path));
 };
 
+const loadUncachedDevModule = async (rootDir: string, modulePath: string, shouldLog = false): Promise<Result<string>> => {
+    if (modulePath.endsWith(".svelte")) {
+        return compileSvelteForDev(rootDir, modulePath, shouldLog);
+    }
+
+    if (modulePath.endsWith(".js")) {
+        const source = await loadRequiredText(join(rootDir, modulePath));
+        if (!source.ok) {
+            return source;
+        }
+
+        const rewritten = await rewriteBareImportsForDev(source.value, join(rootDir, modulePath));
+        if (!rewritten.ok) {
+            return rewritten;
+        }
+
+        if (shouldLog) {
+            logRecompiledAsset(modulePath, rewritten.value);
+        }
+
+        return ok(rewritten.value);
+    }
+
+    if (modulePath.endsWith(".ts")) {
+        return transpileTypeScriptForDev(rootDir, modulePath, shouldLog);
+    }
+
+    return fail(`Unsupported dev module: ${modulePath}`);
+};
+
 const loadDevModule = async (
     rootDir: string,
     modulePath: string,
@@ -230,41 +391,13 @@ const loadDevModule = async (
         return ok(cached);
     }
 
-    if (modulePath.endsWith(".svelte")) {
-        const compiled = await compileSvelteForDev(rootDir, modulePath, shouldLog);
-        if (!compiled.ok) {
-            return compiled;
-        }
-
-        cache.write(modulePath, mtime.value, compiled.value);
-        return compiled;
+    const loaded = await loadUncachedDevModule(rootDir, modulePath, shouldLog);
+    if (!loaded.ok) {
+        return loaded;
     }
 
-    if (modulePath.endsWith(".js")) {
-        const source = await loadRequiredText(join(rootDir, modulePath));
-        if (!source.ok) {
-            return source;
-        }
-
-        if (shouldLog) {
-            logRecompiledAsset(modulePath, source.value);
-        }
-
-        cache.write(modulePath, mtime.value, source.value);
-        return source;
-    }
-
-    if (modulePath.endsWith(".ts")) {
-        const transpiled = await transpileTypeScriptForDev(rootDir, modulePath, shouldLog);
-        if (!transpiled.ok) {
-            return transpiled;
-        }
-
-        cache.write(modulePath, mtime.value, transpiled.value);
-        return transpiled;
-    }
-
-    return fail(`Unsupported dev module: ${modulePath}`);
+    cache.write(modulePath, mtime.value, loaded.value);
+    return loaded;
 };
 
 const compileChangedDevAsset = async (rootDir: string, modulePath: string, cache: DevCompileCache): Promise<void> => {
@@ -490,6 +623,75 @@ const resolveDevRequestPath = async (
     return ok({ filePath, modulePath, resolvedPath: realFilePath });
 };
 
+const getNodeModulePackageNameSegments = (segments: string[]): string[] => {
+    if (segments[0]?.startsWith("@")) {
+        return segments.length >= 2 ? segments.slice(0, 2) : [];
+    }
+
+    return segments.length >= 1 ? segments.slice(0, 1) : [];
+};
+
+const resolveDevNodeModuleRequestPath = async (
+    nodeModulesRoot: string,
+    rawPathname: string,
+): Promise<Result<{ filePath: string; modulePath: string; packageRoot: string; resolvedPath: string }>> => {
+    const encodedPath = rawPathname.slice("/_node_modules/".length);
+    let decodedPath: string;
+
+    try {
+        decodedPath = decodeURIComponent(encodedPath);
+    } catch {
+        return fail("Rejected path");
+    }
+
+    const segments: string[] = [];
+    for (const segment of decodedPath.replaceAll("\\", "/").split("/")) {
+        if (segment.length === 0 || segment === ".") {
+            continue;
+        }
+
+        if (segment === "..") {
+            return fail("Rejected path");
+        }
+
+        segments.push(segment);
+    }
+
+    const packageNameSegments = getNodeModulePackageNameSegments(segments);
+    if (packageNameSegments.length === 0 || segments.length <= packageNameSegments.length) {
+        return fail("Rejected path");
+    }
+
+    const packagePath = join(nodeModulesRoot, ...packageNameSegments);
+    let packageRoot: string;
+    try {
+        packageRoot = dirname(realpathSync(join(packagePath, "package.json")));
+    } catch {
+        return fail("Rejected path");
+    }
+
+    const moduleSegments = segments.slice(packageNameSegments.length);
+    const modulePath = moduleSegments.join("/");
+    const filePath = join(packagePath, modulePath);
+
+    if (!(await Bun.file(filePath).exists())) {
+        return ok({ filePath, modulePath, packageRoot, resolvedPath: filePath });
+    }
+
+    let resolvedPath: string;
+    try {
+        resolvedPath = realpathSync(filePath);
+    } catch {
+        return fail("Rejected path");
+    }
+
+    if (!isPathInsideRoot(packageRoot, resolvedPath)) {
+        return fail("Rejected path");
+    }
+
+    return ok({ filePath, modulePath, packageRoot, resolvedPath });
+};
+
 export const findNodeModulesRoot = async (startDir: string): Promise<Result<string>> => {
     let current = startDir;
     let fallback: string | undefined;
@@ -515,13 +717,7 @@ export const findNodeModulesRoot = async (startDir: string): Promise<Result<stri
 };
 
 const createImportMap = () => ({
-    imports: {
-        "esm-env": "/_virtual/esm-env.js",
-        "svelte": "/_node_modules/svelte/src/index-client.js",
-        "svelte/internal": "/_node_modules/svelte/src/internal/index.js",
-        "svelte/internal/client": "/_node_modules/svelte/src/internal/client/index.js",
-        "svelte/internal/disclose-version": "/_node_modules/svelte/src/internal/disclose-version.js",
-    },
+    imports: DEV_SPECIAL_IMPORTS,
 });
 
 const loadRequiredText = async (path: string): Promise<Result<string>> => {
@@ -574,11 +770,17 @@ const compileSvelteForDev = async (rootDir: string, modulePath: string, shouldLo
         .then(
             ({ css, js }) => {
                 const contents = js.code + createCssInjection(modulePath, css?.code);
-                if (shouldLog) {
-                    logRecompiledAsset(modulePath, contents);
-                }
+                return rewriteBareImportsForDev(contents, join(rootDir, modulePath)).then((rewritten) => {
+                    if (!rewritten.ok) {
+                        return rewritten;
+                    }
 
-                return ok(contents);
+                    if (shouldLog) {
+                        logRecompiledAsset(modulePath, rewritten.value);
+                    }
+
+                    return ok(rewritten.value);
+                });
             },
             (error) => fail(`Failed to compile ${modulePath}: ${getErrorMessage(error)}`),
         );
@@ -593,11 +795,17 @@ const transpileTypeScriptForDev = async (rootDir: string, modulePath: string, sh
     return Promise.resolve()
         .then(() => {
             const transformed = tsTranspiler.transformSync(source.value);
-            if (shouldLog) {
-                logRecompiledAsset(modulePath, transformed);
-            }
+            return rewriteBareImportsForDev(transformed, join(rootDir, modulePath)).then((rewritten) => {
+                if (!rewritten.ok) {
+                    return rewritten;
+                }
 
-            return ok(transformed);
+                if (shouldLog) {
+                    logRecompiledAsset(modulePath, rewritten.value);
+                }
+
+                return ok(rewritten.value);
+            });
         })
         .catch((error) => fail(`Failed to transpile ${modulePath}: ${getErrorMessage(error)}`));
 };
@@ -678,6 +886,14 @@ export const runConfiguredDevServer = async (cwd = process.cwd()): Promise<Resul
         return fail(`Invalid appComponent in bun-svelte-builder.config.ts: expected a path inside the project root.`);
     }
     const sourceRoot = resolveDevSourceRoot(rootDir, appComponentPath);
+    const sourcePathPrefix = (() => {
+        const relativeSourceRoot = normalizeModulePath(relative(rootDir, sourceRoot));
+        if (relativeSourceRoot.length === 0 || relativeSourceRoot === ".") {
+            return undefined;
+        }
+
+        return `/${relativeSourceRoot}/`;
+    })();
     const assetsDir = await resolveConfiguredAssetsDir(rootDir, config.value.assetsDir);
     if (!assetsDir.ok) {
         return assetsDir;
@@ -744,9 +960,25 @@ export const runConfiguredDevServer = async (cwd = process.cwd()): Promise<Resul
             }
 
             if (rawPathname.startsWith("/_node_modules/")) {
-                const resolvedNodeModulePath = await resolveDevRequestPath(nodeModulesRoot.value, rawPathname, "/_node_modules/");
+                const resolvedNodeModulePath = await resolveDevNodeModuleRequestPath(nodeModulesRoot.value, rawPathname);
                 if (!resolvedNodeModulePath.ok) {
                     return new Response("Not Found", { status: 404 });
+                }
+
+                if (isCompilableDevModule(resolvedNodeModulePath.value.modulePath)) {
+                    const compiled = await loadUncachedDevModule(
+                        resolvedNodeModulePath.value.packageRoot,
+                        resolvedNodeModulePath.value.modulePath,
+                    );
+                    if (!compiled.ok) {
+                        return compiled.error.startsWith("Missing file:")
+                            ? createNotFoundResponse()
+                            : new Response(compiled.error, { status: 500 });
+                    }
+
+                    return new Response(compiled.value, {
+                        headers: { "Content-Type": "application/javascript" },
+                    });
                 }
 
                 const nodeModuleFile = Bun.file(resolvedNodeModulePath.value.filePath);
@@ -816,6 +1048,13 @@ export const runConfiguredDevServer = async (cwd = process.cwd()): Promise<Resul
 
                 return new Response(compiled.value, {
                     headers: { "Content-Type": "application/javascript" },
+                });
+            }
+
+            if (shouldServeDevAppShell(req.method, url.pathname, sourcePathPrefix)) {
+                const importMapScript = `<script type="importmap">${JSON.stringify(importMap)}</script>`;
+                return new Response(createDevHtmlShell(importMapScript, mountId, appTitle), {
+                    headers: { "Content-Type": "text/html" },
                 });
             }
 
