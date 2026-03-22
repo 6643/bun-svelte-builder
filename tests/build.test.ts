@@ -1576,6 +1576,66 @@ test("buildProduction recovers a stale lock and converts symlink dist back to a 
     expect(readFileSync(join(distPath, result.value.htmlFile), "utf8")).toContain(result.value.jsFile);
 });
 
+test("buildProduction stale lock recovery preserves unrelated stage directories", async () => {
+    const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-stale-lock-scope-"));
+    createdDirs.push(rootDir);
+
+    mkdirSync(join(rootDir, "src"), { recursive: true });
+    mkdirSync(join(rootDir, "assets"), { recursive: true });
+    mkdirSync(join(rootDir, "dist.lock"), { recursive: true });
+
+    writeFileSync(
+        join(rootDir, "src", "App.svelte"),
+        ["<h1>stale scope</h1>", "", "<style>", "  h1 { color: seagreen; }", "</style>"].join("\n"),
+    );
+
+    const unrelatedStageDir = join(rootDir, ".bsp-stage-foreign-build");
+    mkdirSync(unrelatedStageDir, { recursive: true });
+    writeFileSync(join(unrelatedStageDir, "sentinel.txt"), "keep-me");
+    writeFileSync(join(rootDir, "dist.lock", "owner.json"), JSON.stringify({ pid: 999999 }));
+
+    const result = await buildProduction({ rootDir });
+    expect(result.ok).toBe(true);
+
+    if (!result.ok) {
+        throw new Error(result.error);
+    }
+
+    expect(existsSync(unrelatedStageDir)).toBe(true);
+    expect(readFileSync(join(unrelatedStageDir, "sentinel.txt"), "utf8")).toBe("keep-me");
+});
+
+test("loadSvelteConfig reloads updated config from the same cwd", async () => {
+    const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-config-reload-"));
+    createdDirs.push(rootDir);
+
+    mkdirSync(join(rootDir, "src"), { recursive: true });
+    writeFileSync(join(rootDir, "src", "App.svelte"), "<h1>config reload</h1>");
+
+    writeFileSync(join(rootDir, "svelte-builder.config.ts"), 'export default { appTitle: "first" };');
+
+    const { loadSvelteConfig } = await import("../src/build.ts");
+    const first = await loadSvelteConfig(rootDir);
+
+    writeFileSync(join(rootDir, "svelte-builder.config.ts"), 'export default { appTitle: "second" };');
+
+    const second = await loadSvelteConfig(rootDir);
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+
+    if (!first.ok) {
+        throw new Error(first.error);
+    }
+
+    if (!second.ok) {
+        throw new Error(second.error);
+    }
+
+    expect(first.value.appTitle).toBe("first");
+    expect(second.value.appTitle).toBe("second");
+});
+
 test("runConfiguredDevServer rejects htmlTemplate in config", async () =>
     runSequentialDevTest(async () => {
     const devPort = await allocateFreePort();
@@ -1749,6 +1809,44 @@ test("runConfiguredDevServer serves the built-in html shell and injects the impo
     expect(html).toContain("<title>Svelte Builder</title>");
     expect(html).toContain('<main id="app"></main>');
     expect(html).toContain('<script type="importmap">');
+    }));
+
+test("runConfiguredDevServer injects a live reload client into the dev html shell", async () =>
+    runSequentialDevTest(async () => {
+    const devPort = await allocateFreePort();
+    const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-dev-live-reload-shell-"));
+    createdDirs.push(rootDir);
+
+    mkdirSync(join(rootDir, "src"), { recursive: true });
+    mkdirSync(join(rootDir, "assets"), { recursive: true });
+
+    writeFileSync(join(rootDir, "src", "App.svelte"), "<h1>dev live reload</h1>");
+    writeFileSync(
+        join(rootDir, "svelte-builder.config.ts"),
+        [
+            'import { defineSvelteConfig } from "svelte-builder";',
+            "",
+            "export default defineSvelteConfig({",
+            `    port: ${devPort},`,
+            "});",
+        ].join("\n"),
+    );
+
+    const { runConfiguredDevServer } = await import("../src/index.ts");
+    const result = await runConfiguredDevServer(rootDir);
+
+    if (!result.ok) {
+        throw new Error(result.error);
+    }
+
+    const response = await fetch(`http://127.0.0.1:${result.value.port}/`);
+    const html = await response.text();
+
+    await result.value.stop();
+
+    expect(response.ok).toBe(true);
+    expect(html).toContain("/___live_reload");
+    expect(html).toContain("EventSource");
     }));
 
 test("runConfiguredDevServer serves the app shell for direct SPA route requests", async () =>

@@ -56,7 +56,21 @@ const escapeHtml = (value: string): string =>
 
 const createNotFoundResponse = (): Response => new Response("Not Found", { status: 404 });
 const normalizeModulePath = (value: string): string => value.replaceAll("\\", "/");
+const DEV_LIVE_RELOAD_PATH = "/___live_reload";
 const DEV_INTERNAL_PATH_PREFIXES = ["/_node_modules/", "/_virtual/", "/assets/"] as const;
+
+const createDevLiveReloadScript = (): string =>
+    [
+        "<script>",
+        `    const source = new EventSource(${JSON.stringify(DEV_LIVE_RELOAD_PATH)});`,
+        '    source.onmessage = (event) => {',
+        '        if (event.data === "reload") {',
+        "            source.close();",
+        "            location.reload();",
+        "        }",
+        "    };",
+        "</script>",
+    ].join("\n");
 
 const createDevHtmlShell = (importMapScript: string, mountId: string, appTitle: string): string =>
     [
@@ -69,6 +83,7 @@ const createDevHtmlShell = (importMapScript: string, mountId: string, appTitle: 
         "</head>",
         "<body>",
         `    ${createHtmlShell(mountId, appTitle).appHtml}`,
+        `    ${createDevLiveReloadScript()}`,
         '    <script type="module" src="/main.ts"></script>',
         "</body>",
         "</html>",
@@ -83,7 +98,7 @@ const shouldServeDevAppShell = (method: string, pathname: string, sourcePathPref
         return false;
     }
 
-    if (pathname === "/main.ts" || pathname === "/___live_reload" || pathname === "/_virtual/esm-env.js") {
+    if (pathname === "/main.ts" || pathname === DEV_LIVE_RELOAD_PATH || pathname === "/_virtual/esm-env.js") {
         return false;
     }
 
@@ -926,7 +941,7 @@ export const runConfiguredDevServer = async (cwd = process.cwd()): Promise<Resul
                 });
             }
 
-            if (url.pathname === "/___live_reload") {
+            if (url.pathname === DEV_LIVE_RELOAD_PATH) {
                 return createSSEResponse(reloadHub, req.signal);
             }
 

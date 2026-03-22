@@ -1,7 +1,7 @@
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 import { compile } from "svelte/compiler";
 import { createBootstrapSource, createImportPath } from "./bootstrap";
 import { copyConfiguredAssets, resolveConfiguredAssetsDir } from "./assets";
@@ -58,6 +58,27 @@ const STAGE_OUTDIR_NAME = ".bsp-stage";
 const TEMP_OUTDIR_NAME = "bsp-out";
 const RELEASES_DIR_NAME = ".bsp-releases";
 const CONFIG_FILE_NAME = "svelte-builder.config.ts";
+const CONFIG_LOADER_EVAL = [
+    'const { pathToFileURL } = await import("node:url");',
+    "const configPath = process.argv[1];",
+    "try {",
+    "    const module = await import(pathToFileURL(configPath).href);",
+    "    const loaded = module.default ?? module.config;",
+    "    if (loaded === undefined) {",
+    '        console.error("Missing default export");',
+    "        process.exit(2);",
+    "    }",
+    "    const serialized = JSON.stringify(loaded);",
+    "    if (serialized === undefined) {",
+    '        console.error("Config is not JSON-serializable");',
+    "        process.exit(3);",
+    "    }",
+    "    process.stdout.write(serialized);",
+    "} catch (error) {",
+    "    console.error(error instanceof Error ? error.message : String(error));",
+    "    process.exit(1);",
+    "}",
+].join("\n");
 
 const ok = <T>(value: T): Result<T> => ({ ok: true, value });
 
@@ -364,7 +385,11 @@ const prepareDir = async (path: string): Promise<Result<string>> => {
 
 const createBuildNonce = (): string => randomUUID().replaceAll("-", "");
 
-const createStageDir = (rootDir: string, nonce: string): string => join(rootDir, `${STAGE_OUTDIR_NAME}-${nonce}`);
+const createStageDirPrefix = (rootDir: string, outDir: string): string =>
+    `${STAGE_OUTDIR_NAME}-${createHex16Hash(relative(rootDir, outDir).replaceAll("\\", "/"))}`;
+
+const createStageDir = (rootDir: string, outDir: string, nonce: string): string =>
+    join(rootDir, `${createStageDirPrefix(rootDir, outDir)}-${nonce}`);
 
 const createTempOutDir = (outDir: string, nonce: string): string =>
     join(dirname(outDir), `.${basename(outDir)}.${TEMP_OUTDIR_NAME}-${nonce}`);
@@ -396,7 +421,7 @@ const cleanupRecoveredBuildState = async (rootDir: string, outDir: string): Prom
         .then((entries) =>
             Promise.all(
                 entries
-                    .filter((entry) => entry.startsWith(`${STAGE_OUTDIR_NAME}-`))
+                    .filter((entry) => entry.startsWith(`${createStageDirPrefix(rootDir, outDir)}-`))
                     .map((entry) => rm(join(rootDir, entry), { force: true, recursive: true }).catch(() => undefined)),
             ),
         )
@@ -599,6 +624,27 @@ export const defineSvelteConfig = (config: BuildSvelteOptions): BuildSvelteOptio
 
 const resolveSourcemapMode = (sourcemap: boolean | undefined): Bun.BuildConfig["sourcemap"] => (sourcemap ? "inline" : "none");
 
+const loadFreshConfigModule = (configPath: string): Result<unknown> => {
+    const loaded = spawnSync(process.execPath, ["-e", CONFIG_LOADER_EVAL, configPath], {
+        encoding: "utf8",
+    });
+
+    if (loaded.error) {
+        return fail(`Failed to load ${configPath}: ${getErrorMessage(loaded.error)}`);
+    }
+
+    if (loaded.status !== 0) {
+        const detail = loaded.stderr.trim() || loaded.stdout.trim() || `child exit ${loaded.status}`;
+        return fail(`Failed to load ${configPath}: ${detail}`);
+    }
+
+    try {
+        return ok(JSON.parse(loaded.stdout) as unknown);
+    } catch (error) {
+        return fail(`Failed to parse ${configPath}: ${getErrorMessage(error)}`);
+    }
+};
+
 export const loadSvelteConfig = async (cwd = process.cwd()): Promise<Result<BuildSvelteOptions>> => {
     const configRoot = resolve(cwd);
     const configPath = join(configRoot, CONFIG_FILE_NAME);
@@ -607,25 +653,20 @@ export const loadSvelteConfig = async (cwd = process.cwd()): Promise<Result<Buil
         return fail(`Missing config: ${configPath}`);
     }
 
-    return import(pathToFileURL(configPath).href).then(
-        (module) => {
-            const loaded = module.default ?? module.config;
-            if (loaded === undefined) {
-                return fail(`Missing default export in ${configPath}`);
-            }
+    const loaded = loadFreshConfigModule(configPath);
+    if (!loaded.ok) {
+        return loaded;
+    }
 
-            const parsed = parseBuildConfig(loaded);
-            if (!parsed.ok) {
-                return parsed;
-            }
+    const parsed = parseBuildConfig(loaded.value);
+    if (!parsed.ok) {
+        return parsed;
+    }
 
-            return ok({
-                ...parsed.value,
-                rootDir: configRoot,
-            });
-        },
-        (error) => fail(`Failed to load ${configPath}: ${getErrorMessage(error)}`),
-    );
+    return ok({
+        ...parsed.value,
+        rootDir: configRoot,
+    });
 };
 
 const readStagedJavaScriptAssets = async (
@@ -774,7 +815,7 @@ export const buildSvelte = async (options: BuildSvelteOptions = {}): Promise<Res
         return validatedOutDir;
     }
 
-    const stageDir = createStageDir(rootDir, buildNonce);
+    const stageDir = createStageDir(rootDir, validatedOutDir.value, buildNonce);
     const tempOutDir = createTempOutDir(validatedOutDir.value, buildNonce);
 
     const entryExists = await Bun.file(appComponentPath).exists();
