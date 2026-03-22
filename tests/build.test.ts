@@ -1684,6 +1684,27 @@ test("loadSvelteConfig ignores non-serializable unknown fields", async () => {
     expect(result.value.appTitle).toBe("ok");
 });
 
+test("loadSvelteConfig rejects non-serializable known fields instead of falling back to defaults", async () => {
+    const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-config-known-field-"));
+    createdDirs.push(rootDir);
+
+    mkdirSync(join(rootDir, "src"), { recursive: true });
+    writeFileSync(join(rootDir, "src", "App.svelte"), "<h1>config known field</h1>");
+    writeFileSync(join(rootDir, "svelte-builder.config.ts"), 'export default { mountId: () => "bad" };');
+
+    const { loadSvelteConfig } = await import("../src/build.ts");
+    const result = await loadSvelteConfig(rootDir);
+
+    expect(result.ok).toBe(false);
+
+    if (result.ok) {
+        throw new Error("Expected loadSvelteConfig to reject a non-serializable known field");
+    }
+
+    expect(result.error).toContain("Invalid mountId");
+    expect(result.error).toContain("expected string");
+});
+
 test("runConfiguredDevServer rejects htmlTemplate in config", async () =>
     runSequentialDevTest(async () => {
     const devPort = await allocateFreePort();

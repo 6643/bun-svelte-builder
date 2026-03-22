@@ -62,20 +62,30 @@ const CONFIG_FILE_NAME = "svelte-builder.config.ts";
 const CONFIG_LOADER_EVAL = [
     'const { pathToFileURL } = await import("node:url");',
     "const hasOwnProperty = (value, key) => Object.prototype.hasOwnProperty.call(value, key);",
-    "const selectSerializableConfig = (loaded) => {",
+    'const NON_SERIALIZABLE_KNOWN_FIELD = { __svelteBuilderInvalidKnownField: true };',
+    "const serializeKnownFieldValue = (value) => {",
+    '    if (value === null || value === undefined || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {',
+    "        return value;",
+    "    }",
+    "    return NON_SERIALIZABLE_KNOWN_FIELD;",
+    "};",
+    "const createSerializedConfigPayload = (loaded) => {",
     '    if (typeof loaded !== "object" || loaded === null || Array.isArray(loaded)) {',
-    "        return loaded;",
+    '        if (typeof loaded === "bigint" || typeof loaded === "function" || typeof loaded === "symbol") {',
+    '            return { kind: "invalid-top-level" };',
+    "        }",
+    '        return { kind: "value", value: loaded };',
     "    }",
     "    const selected = {};",
     '    for (const key of ["appTitle", "appComponent", "assetsDir", "outDir", "mountId", "port", "sourcemap", "stripSvelteDiagnostics"]) {',
     "        if (hasOwnProperty(loaded, key)) {",
-    "            selected[key] = loaded[key];",
+    "            selected[key] = serializeKnownFieldValue(loaded[key]);",
     "        }",
     "    }",
     '    if (hasOwnProperty(loaded, "htmlTemplate")) {',
     "        selected.htmlTemplate = true;",
     "    }",
-    "    return selected;",
+    '    return { kind: "value", value: selected };',
     "};",
     "const configPath = process.argv[1];",
     "try {",
@@ -85,7 +95,7 @@ const CONFIG_LOADER_EVAL = [
         '        console.error("Missing default export");',
         "        process.exit(2);",
     "    }",
-    "    const serialized = JSON.stringify(selectSerializableConfig(loaded));",
+    "    const serialized = JSON.stringify(createSerializedConfigPayload(loaded));",
     "    if (serialized === undefined) {",
     '        console.error("Config is not JSON-serializable");',
     "        process.exit(3);",
@@ -693,7 +703,15 @@ const loadFreshConfigModule = (configPath: string): Result<unknown> => {
     }
 
     try {
-        return ok(JSON.parse(loaded.stdout) as unknown);
+        const payload = JSON.parse(loaded.stdout) as
+            | { kind: "invalid-top-level" }
+            | { kind: "value"; value: unknown };
+
+        if (payload.kind === "invalid-top-level") {
+            return ok([]);
+        }
+
+        return ok(payload.value);
     } catch (error) {
         return fail(`Failed to parse ${configPath}: ${getErrorMessage(error)}`);
     }
