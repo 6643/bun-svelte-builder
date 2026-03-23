@@ -1705,6 +1705,26 @@ test("loadSvelteConfig rejects non-serializable known fields instead of falling 
     expect(result.error).toContain("expected string");
 });
 
+test("loadSvelteConfig rejects top-level array configs even when they contain non-serializable values", async () => {
+    const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-config-array-bigint-"));
+    createdDirs.push(rootDir);
+
+    mkdirSync(join(rootDir, "src"), { recursive: true });
+    writeFileSync(join(rootDir, "src", "App.svelte"), "<h1>config array bigint</h1>");
+    writeFileSync(join(rootDir, "svelte-builder.config.ts"), "export default [1n];");
+
+    const { loadSvelteConfig } = await import("../src/build.ts");
+    const result = await loadSvelteConfig(rootDir);
+
+    expect(result.ok).toBe(false);
+
+    if (result.ok) {
+        throw new Error("Expected loadSvelteConfig to reject a top-level array config");
+    }
+
+    expect(result.error).toContain("Invalid svelte-builder.config.ts: expected a default-exported object config.");
+});
+
 test("runConfiguredDevServer rejects htmlTemplate in config", async () =>
     runSequentialDevTest(async () => {
     const devPort = await allocateFreePort();
