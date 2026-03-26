@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import { compile } from "svelte/compiler";
-import { createHtmlShell, type BuildSvelteOptions, type Result, loadSvelteConfig, resolveAppSourceRoot } from "./build";
+import { createHtmlShell, type BuildSvelteOptions, type Result, loadSvelteConfig, resolveAppSourceRoot, validateResolvedAppComponentPath } from "./build";
 import { createBootstrapSource, createImportPath, resolveConfiguredPath } from "./bootstrap";
 import { resolveConfiguredAssetsDir, resolvePhysicalAssetPath } from "./assets";
 import { formatAssetReport } from "./report";
@@ -919,6 +919,13 @@ export const runConfiguredDevServer = async (cwd = process.cwd()): Promise<Resul
     const sourceRoot = resolveAppSourceRoot(rootDir, appComponentPath);
     if (!sourceRoot.ok) {
         return sourceRoot;
+    }
+    const appComponentExists = await Bun.file(appComponentPath).exists();
+    if (appComponentExists) {
+        const validatedAppComponentPath = validateResolvedAppComponentPath(rootDir, sourceRoot.value, appComponentPath);
+        if (!validatedAppComponentPath.ok) {
+            return validatedAppComponentPath;
+        }
     }
     const sourcePathPrefix = (() => {
         const relativeSourceRoot = normalizeModulePath(relative(rootDir, sourceRoot.value));

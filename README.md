@@ -38,6 +38,7 @@ dev 源码边界:
 - dev 只直接暴露源码树里的 `.ts`、`.js`、`.svelte` 模块, 不直接暴露项目根上的 `svelte-builder.config.json`、测试文件或其他脚本
 - 若 `appComponent` 位于 `src/` 下的更深层目录, dev 仍会回收到 `src/` 作为源码服务和 watch 根
 - 若 `appComponent` 位于其他顶级源码目录, dev 会以该顶级目录作为源码服务和 watch 根
+- `appComponent` 若是符号链接, 它解析后的目标仍必须留在对应源码树内
 
 公共配置与默认值:
 
@@ -132,6 +133,7 @@ src/lazy/ButtonDemo.svelte   2026-03-18 11:11:11  4.1 KiB  1.9 KiB
 - 最终产物直接写入当前项目的 `<outDir>/`
 - 同一输出目录只允许一个构建进程写入
 - `outDir` 必须位于项目根目录内, 且必须是独立输出目录, 不能配置为 `.` 或覆盖 `appComponent` 所在源码树
+- 只有在新产物准备完成后才会切换到 `<outDir>/`; 若最终发布失败, 现有输出目录会保留
 - 若检测到失效的 `dist.lock`, 构建会自动回收后继续
 
 安全注意事项:

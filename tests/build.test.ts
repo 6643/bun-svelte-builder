@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, mock, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -9,6 +9,7 @@ import {
     mkdirSync,
     readFileSync,
     readdirSync,
+    renameSync,
     rmSync,
     symlinkSync,
     writeFileSync,
@@ -31,6 +32,7 @@ const importRootServerModule = () => import("../server");
 const buildProduction = async (options?: BuildSvelteOptions) => (await importRootBuildModule()).buildProduction(options);
 
 afterEach(() => {
+    mock.restore();
     for (const dir of createdDirs.splice(0)) {
         rmSync(dir, { recursive: true, force: true });
     }
@@ -1082,6 +1084,29 @@ test("buildSvelte rejects root-level appComponent paths outside a source directo
     expect(result.error).toMatch(/source directory|top-level source/i);
 });
 
+test("buildSvelte rejects appComponent symlinks that resolve outside the app source tree", async () => {
+    const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-app-component-symlink-"));
+    const outsideDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-app-component-symlink-outside-"));
+    createdDirs.push(rootDir, outsideDir);
+
+    mkdirSync(join(rootDir, "src"), { recursive: true });
+    mkdirSync(join(rootDir, "assets"), { recursive: true });
+    writeFileSync(join(outsideDir, "Outside.svelte"), "<h1>outside app</h1>");
+    symlinkSync(join(outsideDir, "Outside.svelte"), join(rootDir, "src", "App.svelte"));
+
+    const { buildSvelte } = await import("../src/index.ts");
+    const result = await buildSvelte({ rootDir });
+
+    expect(result.ok).toBe(false);
+
+    if (result.ok) {
+        throw new Error("Expected buildSvelte to reject appComponent symlinks that escape the app source tree");
+    }
+
+    expect(result.error).toContain("appComponent");
+    expect(result.error).toMatch(/source tree|source directory|project root/i);
+});
+
 test("buildSvelte rejects outDir that overlaps the broader source tree", async () => {
     const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-outdir-source-tree-"));
     createdDirs.push(rootDir);
@@ -1606,6 +1631,45 @@ test("buildProduction recovers a stale lock and converts symlink dist back to a 
     expect(existsSync(join(rootDir, "dist.lock"))).toBe(false);
     expect(existsSync(join(rootDir, ".bsp-releases"))).toBe(false);
     expect(readFileSync(join(distPath, result.value.htmlFile), "utf8")).toContain(result.value.jsFile);
+});
+
+test("buildSvelte preserves the previous outDir when the final publish rename fails", async () => {
+    const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-publish-rollback-"));
+    createdDirs.push(rootDir);
+
+    writeRuntimeAwareFixture(rootDir);
+    mkdirSync(join(rootDir, "dist"), { recursive: true });
+    writeFileSync(join(rootDir, "dist", "sentinel.txt"), "keep-me");
+
+    const actualFsPromises = await import("node:fs/promises");
+    let sawPublishRename = false;
+
+    mock.module("node:fs/promises", () => ({
+        ...actualFsPromises,
+        rename: async (from: string, to: string) => {
+            if (from.includes(".dist.bsp-out-") && to === join(rootDir, "dist")) {
+                sawPublishRename = true;
+                throw new Error("simulated publish rename failure");
+            }
+
+            renameSync(from, to);
+        },
+    }));
+
+    const buildModuleUrl = `${pathToFileURL(join(process.cwd(), "src", "build.ts")).href}?publish-rename-failure=${Date.now()}`;
+    const { buildSvelte } = await import(buildModuleUrl);
+    const result = await buildSvelte({ rootDir });
+
+    expect(sawPublishRename).toBe(true);
+    expect(result.ok).toBe(false);
+
+    if (result.ok) {
+        throw new Error("Expected buildSvelte to fail when the final publish rename fails");
+    }
+
+    expect(result.error).toContain("Failed to publish");
+    expect(readFileSync(join(rootDir, "dist", "sentinel.txt"), "utf8")).toBe("keep-me");
+    expect(readdirSync(rootDir).some((entry) => entry.includes(".dist.bsp-out-"))).toBe(false);
 });
 
 test("buildProduction stale lock recovery preserves unrelated stage directories", async () => {
@@ -3030,6 +3094,36 @@ test("runConfiguredDevServer rejects escaped project source paths and still serv
     } finally {
         await result.value.stop();
     }
+    }));
+
+test("runConfiguredDevServer rejects appComponent symlinks that resolve outside the app source tree", async () =>
+    runSequentialDevTest(async () => {
+    const devPort = await allocateFreePort();
+    const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-dev-app-component-symlink-"));
+    const outsideDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-dev-app-component-symlink-outside-"));
+    createdDirs.push(rootDir, outsideDir);
+
+    mkdirSync(join(rootDir, "src"), { recursive: true });
+    mkdirSync(join(rootDir, "assets"), { recursive: true });
+    writeFileSync(join(outsideDir, "Outside.svelte"), "<h1>outside app</h1>");
+    symlinkSync(join(outsideDir, "Outside.svelte"), join(rootDir, "src", "App.svelte"));
+    writeFileSync(
+        join(rootDir, "svelte-builder.config.json"),
+        JSON.stringify({ port: devPort }, null, 4),
+    );
+
+    const { runConfiguredDevServer } = await import("../src/index.ts");
+    const result = await runConfiguredDevServer(rootDir);
+
+    expect(result.ok).toBe(false);
+
+    if (result.ok) {
+        await result.value.stop();
+        throw new Error("Expected runConfiguredDevServer to reject appComponent symlinks that escape the app source tree");
+    }
+
+    expect(result.error).toContain("appComponent");
+    expect(result.error).toMatch(/source tree|source directory|project root/i);
     }));
 
 test("runConfiguredDevServer rejects root-level appComponent paths outside a source directory", async () =>
