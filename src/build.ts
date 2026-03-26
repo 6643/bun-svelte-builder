@@ -70,6 +70,9 @@ const getErrorMessage = (error: unknown): string => {
     return String(error);
 };
 
+const getErrorCode = (error: unknown): string | undefined =>
+    error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : undefined;
+
 const escapeHtml = (value: string): string =>
     value
         .replaceAll("&", "&amp;")
@@ -211,6 +214,27 @@ export const resolveAppSourceRoot = (
     }
 
     return ok(topLevelDir === "src" ? join(rootDir, "src") : join(rootDir, topLevelDir));
+};
+
+export const validateResolvedAppComponentPath = (
+    rootDir: string,
+    appSourceRoot: string,
+    appComponentPath: string,
+    configFileName = CONFIG_FILE_NAME,
+): Result<void> => {
+    try {
+        const realRootDir = realpathSync(rootDir);
+        const realSourceRoot = realpathSync(appSourceRoot);
+        const realAppComponentPath = realpathSync(appComponentPath);
+
+        if (!isPathWithinRoot(realRootDir, realSourceRoot) || !isPathWithinRoot(realSourceRoot, realAppComponentPath)) {
+            return fail(`Invalid appComponent in ${configFileName}: expected the resolved component file to stay inside the app source tree.`);
+        }
+
+        return ok(undefined);
+    } catch (error) {
+        return fail(`Failed to resolve appComponent in ${configFileName}: ${getErrorMessage(error)}`);
+    }
 };
 
 const validateOutDir = (
@@ -364,6 +388,9 @@ const createPublishLockPath = (outDir: string): string => `${outDir}.lock`;
 const createPendingPublishLockPath = (outDir: string, nonce: string): string =>
     join(dirname(outDir), `.${basename(outDir)}.lock-${nonce}`);
 
+const createRollbackOutDir = (outDir: string, nonce: string): string =>
+    join(dirname(outDir), `.${basename(outDir)}.rollback-${nonce}`);
+
 const createPublishLockOwnerPath = (lockPath: string): string => join(lockPath, "owner.json");
 
 const isPidAlive = (pid: number): boolean => {
@@ -512,12 +539,24 @@ const acquirePublishLock = async (rootDir: string, outDir: string, allowRetry = 
 
 const publishBuildOutput = async (rootDir: string, tempOutDir: string, outDir: string): Promise<Result<string>> => {
     const legacyReleaseTarget = resolveLegacyReleaseTarget(rootDir, outDir);
-    const cleared = await rm(outDir, { force: true, recursive: true }).then(
-        () => ok(outDir),
-        (error) => fail(`Failed to clear ${outDir}: ${getErrorMessage(error)}`),
+    const rollbackOutDir = createRollbackOutDir(outDir, createBuildNonce());
+    let movedExistingOutDir = false;
+
+    const movedExisting = await rename(outDir, rollbackOutDir).then(
+        () => {
+            movedExistingOutDir = true;
+            return ok<void>(undefined);
+        },
+        (error: unknown) => {
+            if (getErrorCode(error) === "ENOENT") {
+                return ok<void>(undefined);
+            }
+
+            return fail(`Failed to prepare ${outDir} for publish: ${getErrorMessage(error)}`);
+        },
     );
-    if (!cleared.ok) {
-        return cleared;
+    if (!movedExisting.ok) {
+        return movedExisting;
     }
 
     const published = await rename(tempOutDir, outDir).then(
@@ -525,9 +564,23 @@ const publishBuildOutput = async (rootDir: string, tempOutDir: string, outDir: s
         (error) => fail(`Failed to publish ${outDir}: ${getErrorMessage(error)}`),
     );
     if (!published.ok) {
+        if (movedExistingOutDir) {
+            const restored = await rename(rollbackOutDir, outDir).then(
+                () => ok(outDir),
+                (error) =>
+                    fail(`Failed to restore previous output for ${outDir}: ${getErrorMessage(error)}`),
+            );
+            if (!restored.ok) {
+                return fail(`${published.error} ${restored.error}`);
+            }
+        }
+
         return published;
     }
 
+    if (movedExistingOutDir) {
+        await rm(rollbackOutDir, { force: true, recursive: true }).catch(() => undefined);
+    }
     await cleanupLegacyReleaseTarget(rootDir, legacyReleaseTarget);
     return published;
 };
@@ -760,6 +813,11 @@ export const buildSvelte = async (options: BuildSvelteOptions = {}): Promise<Res
     const entryExists = await Bun.file(appComponentPath).exists();
     if (!entryExists) {
         return fail(`Missing SPA app component: ${appComponentPath}`);
+    }
+
+    const validatedAppComponentPath = validateResolvedAppComponentPath(rootDir, appSourceRoot.value, appComponentPath);
+    if (!validatedAppComponentPath.ok) {
+        return validatedAppComponentPath;
     }
 
     const lock = await acquirePublishLock(rootDir, validatedOutDir.value);
