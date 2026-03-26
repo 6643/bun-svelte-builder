@@ -388,8 +388,10 @@ const createPublishLockPath = (outDir: string): string => `${outDir}.lock`;
 const createPendingPublishLockPath = (outDir: string, nonce: string): string =>
     join(dirname(outDir), `.${basename(outDir)}.lock-${nonce}`);
 
+const createRollbackOutDirPrefix = (outDir: string): string => `.${basename(outDir)}.rollback-`;
+
 const createRollbackOutDir = (outDir: string, nonce: string): string =>
-    join(dirname(outDir), `.${basename(outDir)}.rollback-${nonce}`);
+    join(dirname(outDir), `${createRollbackOutDirPrefix(outDir)}${nonce}`);
 
 const createPublishLockOwnerPath = (lockPath: string): string => join(lockPath, "owner.json");
 
@@ -442,8 +444,65 @@ const cleanupLegacyReleaseTarget = async (rootDir: string, releaseTarget: string
         .catch(() => undefined);
 };
 
+const pathExists = (path: string): boolean => {
+    try {
+        lstatSync(path);
+        return true;
+    } catch {
+        return false;
+    }
+};
+
+const cleanupRecoveredRollbackOutDirs = async (outDir: string): Promise<void> => {
+    const rollbackPrefix = createRollbackOutDirPrefix(outDir);
+    const outDirParent = dirname(outDir);
+
+    const rollbackDirs = await readdir(outDirParent)
+        .then((entries) =>
+            entries
+                .filter((entry) => entry.startsWith(rollbackPrefix))
+                .map((entry) => join(outDirParent, entry))
+                .sort((left, right) => {
+                    const leftMtime = (() => {
+                        try {
+                            return lstatSync(left).mtimeMs;
+                        } catch {
+                            return 0;
+                        }
+                    })();
+                    const rightMtime = (() => {
+                        try {
+                            return lstatSync(right).mtimeMs;
+                        } catch {
+                            return 0;
+                        }
+                    })();
+
+                    return rightMtime - leftMtime;
+                }),
+        )
+        .catch(() => []);
+
+    if (rollbackDirs.length === 0) {
+        return;
+    }
+
+    if (!pathExists(outDir)) {
+        const [restoreDir, ...staleDirs] = rollbackDirs;
+        if (restoreDir !== undefined) {
+            await rename(restoreDir, outDir).catch(() => undefined);
+        }
+
+        await Promise.all(staleDirs.map((dir) => rm(dir, { force: true, recursive: true }).catch(() => undefined)));
+        return;
+    }
+
+    await Promise.all(rollbackDirs.map((dir) => rm(dir, { force: true, recursive: true }).catch(() => undefined)));
+};
+
 const cleanupRecoveredBuildState = async (rootDir: string, outDir: string): Promise<void> => {
     await cleanupLegacyReleaseTarget(rootDir, resolveLegacyReleaseTarget(rootDir, outDir));
+    await cleanupRecoveredRollbackOutDirs(outDir);
 
     await readdir(rootDir)
         .then((entries) =>
