@@ -921,11 +921,13 @@ export const runConfiguredDevServer = async (cwd = process.cwd()): Promise<Resul
         return sourceRoot;
     }
     const appComponentExists = await Bun.file(appComponentPath).exists();
-    if (appComponentExists) {
-        const validatedAppComponentPath = validateResolvedAppComponentPath(rootDir, sourceRoot.value, appComponentPath);
-        if (!validatedAppComponentPath.ok) {
-            return validatedAppComponentPath;
-        }
+    if (!appComponentExists) {
+        return fail(`Missing SPA app component: ${appComponentPath}`);
+    }
+
+    const validatedAppComponentPath = validateResolvedAppComponentPath(rootDir, sourceRoot.value, appComponentPath);
+    if (!validatedAppComponentPath.ok) {
+        return validatedAppComponentPath;
     }
     const sourcePathPrefix = (() => {
         const relativeSourceRoot = normalizeModulePath(relative(rootDir, sourceRoot.value));

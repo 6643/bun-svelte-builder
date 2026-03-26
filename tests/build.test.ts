@@ -1633,6 +1633,54 @@ test("buildProduction recovers a stale lock and converts symlink dist back to a 
     expect(readFileSync(join(distPath, result.value.htmlFile), "utf8")).toContain(result.value.jsFile);
 });
 
+test("buildProduction stale lock recovery restores rollback output before a later build failure", async () => {
+    const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-stale-lock-rollback-restore-"));
+    createdDirs.push(rootDir);
+
+    mkdirSync(join(rootDir, "src"), { recursive: true });
+    mkdirSync(join(rootDir, "assets"), { recursive: true });
+    mkdirSync(join(rootDir, "dist.lock"), { recursive: true });
+    mkdirSync(join(rootDir, ".dist.rollback-stale"), { recursive: true });
+
+    writeFileSync(join(rootDir, ".dist.rollback-stale", "sentinel.txt"), "keep-me");
+    writeFileSync(join(rootDir, "dist.lock", "owner.json"), JSON.stringify({ pid: 999999 }));
+    writeFileSync(join(rootDir, "src", "App.svelte"), "<script>let =</script>");
+
+    const thrown = await buildProduction({ rootDir }).then(
+        () => null,
+        (error) => error,
+    );
+
+    expect(thrown).not.toBeNull();
+
+    expect(readFileSync(join(rootDir, "dist", "sentinel.txt"), "utf8")).toBe("keep-me");
+    expect(existsSync(join(rootDir, ".dist.rollback-stale"))).toBe(false);
+});
+
+test("buildProduction stale lock recovery removes orphan rollback directories when current outDir already exists", async () => {
+    const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-stale-lock-rollback-orphan-"));
+    createdDirs.push(rootDir);
+
+    writeRuntimeAwareFixture(rootDir);
+    mkdirSync(join(rootDir, "dist"), { recursive: true });
+    mkdirSync(join(rootDir, "dist.lock"), { recursive: true });
+    mkdirSync(join(rootDir, ".dist.rollback-stale"), { recursive: true });
+
+    writeFileSync(join(rootDir, "dist", "existing.txt"), "current-output");
+    writeFileSync(join(rootDir, ".dist.rollback-stale", "sentinel.txt"), "old-output");
+    writeFileSync(join(rootDir, "dist.lock", "owner.json"), JSON.stringify({ pid: 999999 }));
+
+    const result = await buildProduction({ rootDir });
+    expect(result.ok).toBe(true);
+
+    if (!result.ok) {
+        throw new Error(result.error);
+    }
+
+    expect(existsSync(join(rootDir, ".dist.rollback-stale"))).toBe(false);
+    expect(existsSync(join(rootDir, "dist", result.value.htmlFile))).toBe(true);
+});
+
 test("buildSvelte preserves the previous outDir when the final publish rename fails", async () => {
     const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-publish-rollback-"));
     createdDirs.push(rootDir);
@@ -3124,6 +3172,33 @@ test("runConfiguredDevServer rejects appComponent symlinks that resolve outside 
 
     expect(result.error).toContain("appComponent");
     expect(result.error).toMatch(/source tree|source directory|project root/i);
+    }));
+
+test("runConfiguredDevServer fails fast when the configured appComponent file is missing", async () =>
+    runSequentialDevTest(async () => {
+    const devPort = await allocateFreePort();
+    const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-dev-missing-app-component-"));
+    createdDirs.push(rootDir);
+
+    mkdirSync(join(rootDir, "src"), { recursive: true });
+    mkdirSync(join(rootDir, "assets"), { recursive: true });
+    writeFileSync(
+        join(rootDir, "svelte-builder.config.json"),
+        JSON.stringify({ port: devPort }, null, 4),
+    );
+
+    const { runConfiguredDevServer } = await import("../src/index.ts");
+    const result = await runConfiguredDevServer(rootDir);
+
+    expect(result.ok).toBe(false);
+
+    if (result.ok) {
+        await result.value.stop();
+        throw new Error("Expected runConfiguredDevServer to fail fast when appComponent is missing");
+    }
+
+    expect(result.error).toContain("Missing SPA app component");
+    expect(result.error).toContain(join(rootDir, "src", "App.svelte"));
     }));
 
 test("runConfiguredDevServer rejects root-level appComponent paths outside a source directory", async () =>
