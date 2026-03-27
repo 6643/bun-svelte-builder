@@ -402,8 +402,16 @@ const loadDevModule = async (
     rootDir: string,
     modulePath: string,
     cache: DevCompileCache,
+    allowedRoots?: string[],
     shouldLog = false,
 ): Promise<Result<string>> => {
+    if (allowedRoots !== undefined && modulePath.endsWith(".svelte")) {
+        const validatedImportGraph = await validateLocalSourceImportGraph(join(rootDir, modulePath), allowedRoots);
+        if (!validatedImportGraph.ok) {
+            return validatedImportGraph;
+        }
+    }
+
     const mtime = getDevModuleMtime(rootDir, modulePath);
     if (!mtime.ok) {
         return mtime;
@@ -424,9 +432,14 @@ const loadDevModule = async (
     return loaded;
 };
 
-const compileChangedDevAsset = async (rootDir: string, modulePath: string, cache: DevCompileCache): Promise<void> => {
+const compileChangedDevAsset = async (
+    rootDir: string,
+    modulePath: string,
+    cache: DevCompileCache,
+    allowedRoots: string[],
+): Promise<void> => {
     cache.invalidate(createDevCompileCacheKey(rootDir, modulePath));
-    const compiled = await loadDevModule(rootDir, modulePath, cache, true);
+    const compiled = await loadDevModule(rootDir, modulePath, cache, allowedRoots, true);
     if (!compiled.ok) {
         console.error(compiled.error);
     }
@@ -445,6 +458,19 @@ const createDevReloadHub = (watchDir: string, watchRoots: DevWatchRoot[]): DevRe
     const watchedDirs = new Set<string>();
     const recursiveWatchRoots = new Set(watchRoots.filter((root) => root.recursive).map((root) => root.path));
     const cache = createDevCompileCache();
+    const allowedRoots = Array.from(
+        new Set(
+            watchRoots
+                .filter((root) => root.recursive)
+                .map((root) => {
+                    try {
+                        return realpathSync(root.path);
+                    } catch {
+                        return root.path;
+                    }
+                }),
+        ),
+    );
 
     const stop = (): void => {
         watchers.forEach((watcher) => watcher.close());
@@ -502,7 +528,7 @@ const createDevReloadHub = (watchDir: string, watchRoots: DevWatchRoot[]): DevRe
                         }
 
                         notify("reload");
-                        void compileChangedDevAsset(watchDir, relativePath, cache);
+                        void compileChangedDevAsset(watchDir, relativePath, cache, allowedRoots);
                     } catch (error) {
                         reportDevWatcherIssue(`watch event for ${join(dir, filename)}`, error);
                     }
@@ -1094,7 +1120,12 @@ export const runConfiguredDevServer = async (cwd = process.cwd()): Promise<Resul
                     return new Response("Not Found", { status: 404 });
                 }
 
-                const compiled = await loadDevModule(rootDir, resolvedSourcePath.value.modulePath, reloadHub.cache);
+                const compiled = await loadDevModule(
+                    rootDir,
+                    resolvedSourcePath.value.modulePath,
+                    reloadHub.cache,
+                    [realpathSync(sourceRoot.value)],
+                );
                 if (!compiled.ok) {
                     return createDevModuleErrorResponse(compiled.error);
                 }
