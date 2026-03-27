@@ -8,6 +8,12 @@ import { createHtmlShell, type BuildSvelteOptions, type Result, loadSvelteConfig
 import { createBootstrapSource, createImportPath, resolveConfiguredPath } from "./bootstrap";
 import { resolveConfiguredAssetsDir, resolvePhysicalAssetPath } from "./assets";
 import { formatAssetReport } from "./report";
+import {
+    isSupportedJavaScriptSourceModule,
+    isSupportedLocalSourceModule,
+    isSupportedSvelteSourceModule,
+    isSupportedTypeScriptSourceModule,
+} from "./source-modules";
 
 export type DevServerHandle = {
     port: number;
@@ -244,8 +250,7 @@ const rewriteBareImportsForDev = async (source: string, importerPath: string): P
     return ok(rewritten);
 };
 
-const isCompilableDevModule = (filePath: string): boolean =>
-    filePath.endsWith(".svelte") || filePath.endsWith(".ts") || filePath.endsWith(".js") || filePath.endsWith(".mjs");
+const isCompilableDevModule = (filePath: string): boolean => isSupportedLocalSourceModule(filePath);
 
 const isExcludedWatchDirectory = (dirName: string): boolean => EXCLUDED_DIRS.includes(dirName);
 
@@ -389,11 +394,11 @@ export const resolveDevWatchRoots = (rootDir: string, assetsDir: string | undefi
 };
 
 const loadUncachedDevModule = async (rootDir: string, modulePath: string, shouldLog = false): Promise<Result<string>> => {
-    if (modulePath.endsWith(".svelte")) {
+    if (isSupportedSvelteSourceModule(modulePath)) {
         return compileSvelteForDev(rootDir, modulePath, shouldLog);
     }
 
-    if (modulePath.endsWith(".js") || modulePath.endsWith(".mjs")) {
+    if (isSupportedJavaScriptSourceModule(modulePath)) {
         const source = await loadRequiredText(join(rootDir, modulePath));
         if (!source.ok) {
             return source;
@@ -411,7 +416,7 @@ const loadUncachedDevModule = async (rootDir: string, modulePath: string, should
         return ok(rewritten.value);
     }
 
-    if (modulePath.endsWith(".ts")) {
+    if (isSupportedTypeScriptSourceModule(modulePath)) {
         return transpileTypeScriptForDev(rootDir, modulePath, shouldLog);
     }
 
@@ -1167,7 +1172,7 @@ export const runConfiguredDevServer = async (cwd = process.cwd()): Promise<Resul
                 return new Response(nodeModuleFile);
             }
 
-            if (rawPathname.endsWith(".ts")) {
+            if (isSupportedTypeScriptSourceModule(rawPathname)) {
                 const resolvedSourcePath = await resolveDevRequestPath(rootDir, rawPathname, "/");
                 if (!resolvedSourcePath.ok) {
                     return new Response("Not Found", { status: 404 });
@@ -1193,7 +1198,7 @@ export const runConfiguredDevServer = async (cwd = process.cwd()): Promise<Resul
                 });
             }
 
-            if (rawPathname.endsWith(".js") || rawPathname.endsWith(".mjs")) {
+            if (isSupportedJavaScriptSourceModule(rawPathname)) {
                 const resolvedSourcePath = await resolveDevRequestPath(rootDir, rawPathname, "/");
                 if (!resolvedSourcePath.ok) {
                     return new Response("Not Found", { status: 404 });
@@ -1219,7 +1224,7 @@ export const runConfiguredDevServer = async (cwd = process.cwd()): Promise<Resul
                 });
             }
 
-            if (rawPathname.endsWith(".svelte")) {
+            if (isSupportedSvelteSourceModule(rawPathname)) {
                 const resolvedSourcePath = await resolveDevRequestPath(rootDir, rawPathname, "/");
                 if (!resolvedSourcePath.ok) {
                     return new Response("Not Found", { status: 404 });

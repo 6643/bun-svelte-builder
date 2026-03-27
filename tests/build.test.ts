@@ -679,6 +679,7 @@ test("repository root package includes release metadata, license, and package-fo
     expect(rootReadme).not.toContain("bun ./node_modules/.bin/svelte-builder");
     expect(rootReadme).toContain("svelte-builder dev");
     expect(rootReadme).toContain("svelte-builder build");
+    expect(rootReadme).toContain("`.mjs`");
     expect(rootReadme).not.toContain("defineSvelteConfig(");
     expect(rootReadme).not.toContain("export default defineSvelteConfig");
     expect(rootReadme).toContain('"appComponent": "src/App.svelte"');
@@ -690,6 +691,11 @@ test("installed cli bin runs directly without wrapping it in bun", () => {
     const installedBin = join(demoRoot, "node_modules", ".bin", "svelte-builder");
 
     rmSync(demoDistDir, { recursive: true, force: true });
+    const install = spawnSync(process.execPath, ["install"], {
+        cwd: demoRoot,
+        encoding: "utf8",
+    });
+    expect(install.status).toBe(0);
 
     const result = spawnSync(installedBin, ["build"], {
         cwd: demoRoot,
@@ -1345,6 +1351,43 @@ test("buildSvelte rejects .mjs helpers that escape the app source tree", async (
     }
 
     expect(result.error).toContain("app source tree");
+});
+
+test("buildSvelte rejects unsupported local source module extensions inside the app source tree", async () => {
+    for (const extension of [".jsx", ".mts"] as const) {
+        const rootDir = mkdtempSync(join(process.cwd(), `.tmp-bsb-unsupported-local-source-${extension.slice(1)}-`));
+        createdDirs.push(rootDir);
+
+        mkdirSync(join(rootDir, "src", "app"), { recursive: true });
+        mkdirSync(join(rootDir, "assets"), { recursive: true });
+
+        writeFileSync(join(rootDir, "src", "app", `helper${extension}`), 'export const helper = "inside";');
+        writeFileSync(
+            join(rootDir, "src", "app", "App.svelte"),
+            [
+                "<script>",
+                `  import { helper } from "./helper${extension}";`,
+                "</script>",
+                "",
+                "<h1>{helper}</h1>",
+            ].join("\n"),
+        );
+
+        const { buildSvelte } = await import("../src/index.ts");
+        const result = await buildSvelte({
+            appComponent: "src/app/App.svelte",
+            rootDir,
+        });
+
+        expect(result.ok).toBe(false);
+
+        if (result.ok) {
+            throw new Error(`Expected buildSvelte to reject unsupported local source module extension ${extension}`);
+        }
+
+        expect(result.error).toContain(`helper${extension}`);
+        expect(result.error).toContain("Supported module extensions");
+    }
 });
 
 test("buildSvelte rejects outDir that overlaps the broader source tree", async () => {
@@ -3778,6 +3821,47 @@ test("runConfiguredDevServer rejects .mjs helpers that escape the app source tre
     expect(result.error).toContain("app source tree");
     }));
 
+test("runConfiguredDevServer rejects unsupported local source module extensions at startup", async () =>
+    runSequentialDevTest(async () => {
+    for (const extension of [".jsx", ".mts"] as const) {
+        const devPort = await allocateFreePort();
+        const rootDir = mkdtempSync(join(process.cwd(), `.tmp-bsb-dev-unsupported-local-source-${extension.slice(1)}-`));
+        createdDirs.push(rootDir);
+
+        mkdirSync(join(rootDir, "src", "app"), { recursive: true });
+        mkdirSync(join(rootDir, "assets"), { recursive: true });
+
+        writeFileSync(join(rootDir, "src", "app", `helper${extension}`), 'export const helper = "inside";');
+        writeFileSync(
+            join(rootDir, "src", "app", "App.svelte"),
+            [
+                "<script>",
+                `  import { helper } from "./helper${extension}";`,
+                "</script>",
+                "",
+                "<h1>{helper}</h1>",
+            ].join("\n"),
+        );
+        writeFileSync(
+            join(rootDir, "svelte-builder.config.json"),
+            JSON.stringify({ appComponent: "src/app/App.svelte", port: devPort }, null, 4),
+        );
+
+        const { runConfiguredDevServer } = await import("../src/index.ts");
+        const result = await runConfiguredDevServer(rootDir);
+
+        expect(result.ok).toBe(false);
+
+        if (result.ok) {
+            await result.value.stop();
+            throw new Error(`Expected runConfiguredDevServer to reject unsupported local source module extension ${extension}`);
+        }
+
+        expect(result.error).toContain(`helper${extension}`);
+        expect(result.error).toContain("Supported module extensions");
+    }
+    }));
+
 test("runConfiguredDevServer rejects escaped relative imports introduced after startup", async () =>
     runSequentialDevTest(async () => {
     const devPort = await allocateFreePort();
@@ -3823,6 +3907,55 @@ test("runConfiguredDevServer rejects escaped relative imports introduced after s
         expect(response.body).not.toContain("outside-runtime-js");
     } finally {
         await result.value.stop();
+    }
+    }));
+
+test("runConfiguredDevServer rejects unsupported local source module extensions introduced in App.svelte after startup", async () =>
+    runSequentialDevTest(async () => {
+    for (const extension of [".jsx", ".mts"] as const) {
+        const devPort = await allocateFreePort();
+        const rootDir = mkdtempSync(join(process.cwd(), `.tmp-bsb-dev-runtime-unsupported-app-import-${extension.slice(1)}-`));
+        createdDirs.push(rootDir);
+
+        mkdirSync(join(rootDir, "src", "app"), { recursive: true });
+        mkdirSync(join(rootDir, "assets"), { recursive: true });
+        writeFileSync(join(rootDir, "src", "app", `helper${extension}`), 'export const helper = "inside-hot";');
+        writeFileSync(join(rootDir, "src", "app", "App.svelte"), "<h1>safe</h1>");
+        writeFileSync(
+            join(rootDir, "svelte-builder.config.json"),
+            JSON.stringify({ appComponent: "src/app/App.svelte", port: devPort }, null, 4),
+        );
+
+        const { runConfiguredDevServer } = await import("../src/index.ts");
+        const result = await runConfiguredDevServer(rootDir);
+
+        if (!result.ok) {
+            throw new Error(result.error);
+        }
+
+        try {
+            writeFileSync(
+                join(rootDir, "src", "app", "App.svelte"),
+                [
+                    "<script>",
+                    `  import { helper } from "./helper${extension}";`,
+                    "</script>",
+                    "",
+                    "<h1>{helper}</h1>",
+                ].join("\n"),
+            );
+
+            await new Promise((resolve) => setTimeout(resolve, 400));
+
+            const response = await requestDevServerPath(result.value.port, "/src/app/App.svelte");
+
+            expect(response.status).toBe(500);
+            expect(response.body).toBe("Internal Server Error");
+            expect(response.body).not.toContain(`helper${extension}`);
+            expect(response.body).not.toContain("inside-hot");
+        } finally {
+            await result.value.stop();
+        }
     }
     }));
 
@@ -3878,6 +4011,62 @@ test("runConfiguredDevServer rejects escaped relative imports introduced in Java
         expect(response.body).not.toContain("outside-hot-js");
     } finally {
         await result.value.stop();
+    }
+    }));
+
+test("runConfiguredDevServer rejects unsupported local source module extensions introduced in JavaScript helpers after startup", async () =>
+    runSequentialDevTest(async () => {
+    for (const extension of [".jsx", ".mts"] as const) {
+        const devPort = await allocateFreePort();
+        const rootDir = mkdtempSync(join(process.cwd(), `.tmp-bsb-dev-runtime-unsupported-js-import-${extension.slice(1)}-`));
+        createdDirs.push(rootDir);
+
+        mkdirSync(join(rootDir, "src", "app"), { recursive: true });
+        mkdirSync(join(rootDir, "assets"), { recursive: true });
+        writeFileSync(join(rootDir, "src", "app", `other${extension}`), 'export const leaked = "inside-hot";');
+        writeFileSync(join(rootDir, "src", "app", "helper.js"), 'export const helper = "safe";');
+        writeFileSync(
+            join(rootDir, "src", "app", "App.svelte"),
+            [
+                "<script>",
+                '  import { helper } from "./helper.js";',
+                "</script>",
+                "",
+                "<h1>{helper}</h1>",
+            ].join("\n"),
+        );
+        writeFileSync(
+            join(rootDir, "svelte-builder.config.json"),
+            JSON.stringify({ appComponent: "src/app/App.svelte", port: devPort }, null, 4),
+        );
+
+        const { runConfiguredDevServer } = await import("../src/index.ts");
+        const result = await runConfiguredDevServer(rootDir);
+
+        if (!result.ok) {
+            throw new Error(result.error);
+        }
+
+        try {
+            writeFileSync(
+                join(rootDir, "src", "app", "helper.js"),
+                [
+                    `import { leaked } from "./other${extension}";`,
+                    "export const helper = leaked;",
+                ].join("\n"),
+            );
+
+            await new Promise((resolve) => setTimeout(resolve, 400));
+
+            const response = await requestDevServerPath(result.value.port, "/src/app/helper.js");
+
+            expect(response.status).toBe(500);
+            expect(response.body).toBe("Internal Server Error");
+            expect(response.body).not.toContain(`other${extension}`);
+            expect(response.body).not.toContain("inside-hot");
+        } finally {
+            await result.value.stop();
+        }
     }
     }));
 

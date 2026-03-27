@@ -7,6 +7,12 @@ import { compile } from "svelte/compiler";
 import { createBootstrapSource, createImportPath } from "./bootstrap";
 import { copyConfiguredAssets, resolveConfiguredAssetsDir } from "./assets";
 import { finalizeJavaScriptAssets, type FinalJavaScriptAsset } from "./finalize-js";
+import {
+    formatSupportedLocalSourceModuleExtensions,
+    isSupportedLocalSourceModule,
+    isSupportedSvelteSourceModule,
+    isSupportedTypeScriptSourceModule,
+} from "./source-modules";
 import { stripSvelteDiagnosticsModule } from "./strip-svelte-diagnostics";
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -398,11 +404,8 @@ const resolveRelativeImportPath = async (specifier: string, importerPath: string
 const buildImportScanner = new Bun.Transpiler({ loader: "js" });
 const buildTypeScriptTranspiler = new Bun.Transpiler({ loader: "ts" });
 
-const isCompilableSourceModule = (path: string): boolean =>
-    path.endsWith(".svelte") || path.endsWith(".ts") || path.endsWith(".js") || path.endsWith(".mjs");
-
 const loadImportValidationSource = async (path: string): Promise<Result<string>> => {
-    if (path.endsWith(".svelte")) {
+    if (isSupportedSvelteSourceModule(path)) {
         const compiled = await compileSvelteModule(path);
         if (!compiled.ok) {
             return fail(compiled.error);
@@ -416,7 +419,7 @@ const loadImportValidationSource = async (path: string): Promise<Result<string>>
         return source;
     }
 
-    if (path.endsWith(".ts")) {
+    if (isSupportedTypeScriptSourceModule(path)) {
         return Promise.resolve()
             .then(() => ok(buildTypeScriptTranspiler.transformSync(source.value)))
             .catch((error) => fail(`Failed to transpile ${path}: ${getErrorMessage(error)}`));
@@ -487,9 +490,13 @@ export const validateLocalSourceImportGraph = async (entryPath: string, allowedR
                 return fail(`Local import escaped app source tree: ${specifier} from ${currentPath}`);
             }
 
-            if (isCompilableSourceModule(resolvedImport.value)) {
-                pending.push(resolvedImport.value);
+            if (!isSupportedLocalSourceModule(resolvedImport.value)) {
+                return fail(
+                    `Unsupported local source module in app source tree: ${specifier} from ${currentPath}. Supported module extensions: ${formatSupportedLocalSourceModuleExtensions()}.`,
+                );
             }
+
+            pending.push(resolvedImport.value);
         }
     }
 

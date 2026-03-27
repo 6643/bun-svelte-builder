@@ -36,11 +36,11 @@ HTML 一律使用内置 shell:
 dev 源码边界:
 
 - 这里的“app 源码树”指 `appComponent` 归属的 `src/` 或其他顶级源码目录
-- dev 只直接暴露 app 源码树里的 `.ts`、`.js`、`.svelte` 模块, 不直接暴露项目根上的 `svelte-builder.config.json`、测试文件或其他脚本
+- dev 只直接暴露 app 源码树里的 `.ts`、`.js`、`.mjs`、`.svelte` 模块, 不直接暴露项目根上的 `svelte-builder.config.json`、测试文件或其他脚本
 - 若 `appComponent` 位于 `src/` 下的更深层目录, dev 仍会回收到 `src/` 作为 app 源码树和 watch 根
 - 若 `appComponent` 位于其他顶级源码目录, dev 会以该顶级目录作为 app 源码树和 watch 根
 - `appComponent` 若是符号链接, 它解析后的目标仍必须留在对应的 app 源码树内
-- 本地源码导入必须留在 app 源码树内; 不支持 `file://`、绝对文件路径或 `import(expr)` 这类无法静态校验的直接文件导入
+- 本地源码导入必须留在 app 源码树内, 且当前只支持上述 `.ts`、`.js`、`.mjs`、`.svelte` 模块; 不支持 `file://`、绝对文件路径、其他本地源码扩展或 `import(expr)` 这类无法静态校验的直接文件导入
 
 公共配置与默认值:
 
