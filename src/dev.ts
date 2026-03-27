@@ -55,6 +55,11 @@ const escapeHtml = (value: string): string =>
         .replaceAll("'", "&#39;");
 
 const createNotFoundResponse = (): Response => new Response("Not Found", { status: 404 });
+const createMethodNotAllowedResponse = (): Response =>
+    new Response("Method Not Allowed", {
+        status: 405,
+        headers: { "Allow": "GET, HEAD" },
+    });
 const normalizeModulePath = (value: string): string => value.replaceAll("\\", "/");
 const DEV_LIVE_RELOAD_PATH = "/___live_reload";
 const DEV_INTERNAL_PATH_PREFIXES = ["/_node_modules/", "/_virtual/", "/assets/"] as const;
@@ -955,6 +960,10 @@ export const runConfiguredDevServer = async (cwd = process.cwd()): Promise<Resul
         async (req: Request) => {
             const url = new URL(req.url);
             const rawPathname = getRawRequestPathname(req.url);
+
+            if (req.method !== "GET" && req.method !== "HEAD") {
+                return createMethodNotAllowedResponse();
+            }
 
             if (url.pathname === "/") {
                 const importMapScript = `<script type="importmap">${JSON.stringify(importMap)}</script>`;

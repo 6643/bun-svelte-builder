@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { compile } from "svelte/compiler";
 import { createBootstrapSource, createImportPath } from "./bootstrap";
 import { copyConfiguredAssets, resolveConfiguredAssetsDir } from "./assets";
@@ -72,6 +73,8 @@ const getErrorMessage = (error: unknown): string => {
 
 const getErrorCode = (error: unknown): string | undefined =>
     error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : undefined;
+
+const isRelativeImportSpecifier = (specifier: string): boolean => specifier.startsWith("./") || specifier.startsWith("../");
 
 const escapeHtml = (value: string): string =>
     value
@@ -237,6 +240,117 @@ export const validateResolvedAppComponentPath = (
     }
 };
 
+const isPathWithinAnyRoot = (roots: string[], candidatePath: string): boolean =>
+    roots.some((rootPath) => isPathWithinRoot(rootPath, candidatePath));
+
+const resolveRelativeImportPath = async (specifier: string, importerPath: string): Promise<Result<string>> => {
+    const importerUrl = pathToFileURL(importerPath).href;
+
+    return Promise.resolve(import.meta.resolve(specifier, importerUrl)).then(
+        (resolvedUrl) => {
+            if (!resolvedUrl.startsWith("file://")) {
+                return fail(`Unsupported resolved import for ${specifier}: ${resolvedUrl}`);
+            }
+
+            return ok(fileURLToPath(resolvedUrl));
+        },
+        (error) => fail(`Failed to resolve ${specifier} from ${importerPath}: ${getErrorMessage(error)}`),
+    );
+};
+
+const buildImportScanner = new Bun.Transpiler({ loader: "js" });
+const buildTypeScriptTranspiler = new Bun.Transpiler({ loader: "ts" });
+
+const isCompilableSourceModule = (path: string): boolean =>
+    path.endsWith(".svelte") || path.endsWith(".ts") || path.endsWith(".js");
+
+const loadImportValidationSource = async (path: string): Promise<Result<string>> => {
+    if (path.endsWith(".svelte")) {
+        const compiled = await compileSvelteModule(path);
+        if (!compiled.ok) {
+            return fail(compiled.error);
+        }
+
+        return ok(compiled.value.js);
+    }
+
+    const source = await readRequiredText(path);
+    if (!source.ok) {
+        return source;
+    }
+
+    if (path.endsWith(".ts")) {
+        return Promise.resolve()
+            .then(() => ok(buildTypeScriptTranspiler.transformSync(source.value)))
+            .catch((error) => fail(`Failed to transpile ${path}: ${getErrorMessage(error)}`));
+    }
+
+    return ok(source.value);
+};
+
+const validateLocalSourceImportGraph = async (entryPath: string, allowedRoots: string[]): Promise<Result<void>> => {
+    const pending = [entryPath];
+    const visited = new Set<string>();
+
+    while (pending.length > 0) {
+        const currentPath = pending.pop();
+        if (currentPath === undefined) {
+            break;
+        }
+
+        const resolvedCurrentPath = (() => {
+            try {
+                return realpathSync(currentPath);
+            } catch {
+                return currentPath;
+            }
+        })();
+        if (visited.has(resolvedCurrentPath)) {
+            continue;
+        }
+        visited.add(resolvedCurrentPath);
+
+        const source = await loadImportValidationSource(currentPath);
+        if (!source.ok) {
+            return source;
+        }
+
+        const specifiers = Array.from(
+            new Set(
+                buildImportScanner
+                    .scanImports(source.value)
+                    .map((record) => record.path)
+                    .filter(isRelativeImportSpecifier),
+            ),
+        );
+
+        for (const specifier of specifiers) {
+            const resolvedImport = await resolveRelativeImportPath(specifier, currentPath);
+            if (!resolvedImport.ok) {
+                return resolvedImport;
+            }
+
+            const resolvedImportPath = (() => {
+                try {
+                    return realpathSync(resolvedImport.value);
+                } catch {
+                    return resolvedImport.value;
+                }
+            })();
+
+            if (!isPathWithinAnyRoot(allowedRoots, resolvedImportPath)) {
+                return fail(`Local import escaped app source tree: ${specifier} from ${currentPath}`);
+            }
+
+            if (isCompilableSourceModule(resolvedImport.value)) {
+                pending.push(resolvedImport.value);
+            }
+        }
+    }
+
+    return ok(undefined);
+};
+
 const validateOutDir = (
     rootDir: string,
     outDir: string,
@@ -346,6 +460,14 @@ const formatBuildLogs = (logs: Array<{ message?: string; name?: string }>): stri
     }
 
     return logs.map((log) => log.message ?? log.name ?? "Unknown build error").join("\n");
+};
+
+const getBuildErrorMessage = (error: unknown): string => {
+    if (typeof error === "object" && error !== null && "logs" in error && Array.isArray(error.logs)) {
+        return formatBuildLogs(error.logs as Array<{ message?: string; name?: string }>);
+    }
+
+    return getErrorMessage(error);
 };
 
 const createMergedCssAsset = (cssByPath: Map<string, string>): { content: string; finalFile: string } => {
@@ -879,6 +1001,11 @@ export const buildSvelte = async (options: BuildSvelteOptions = {}): Promise<Res
         return validatedAppComponentPath;
     }
 
+    const validatedImportGraph = await validateLocalSourceImportGraph(appComponentPath, [realpathSync(appSourceRoot.value)]);
+    if (!validatedImportGraph.ok) {
+        return validatedImportGraph;
+    }
+
     const lock = await acquirePublishLock(rootDir, validatedOutDir.value);
     if (!lock.ok) {
         return lock;
@@ -916,7 +1043,10 @@ export const buildSvelte = async (options: BuildSvelteOptions = {}): Promise<Res
                 entry: "[hash].[ext]",
             },
             outdir: stageDir,
-            plugins: [stripSvelteDiagnostics ? createProductionEsmEnvPlugin() : null, createSveltePlugin(cssByPath)].filter(
+            plugins: [
+                stripSvelteDiagnostics ? createProductionEsmEnvPlugin() : null,
+                createSveltePlugin(cssByPath),
+            ].filter(
                 (plugin): plugin is Bun.BunPlugin => plugin !== null,
             ),
             sourcemap: resolveSourcemapMode(options.sourcemap),
@@ -982,6 +1112,8 @@ export const buildSvelte = async (options: BuildSvelteOptions = {}): Promise<Res
             jsFile: entryAsset.finalFile,
             outDir: validatedOutDir.value,
         });
+    } catch (error) {
+        return fail(getBuildErrorMessage(error));
     } finally {
         await rm(stageDir, { force: true, recursive: true }).catch(() => undefined);
         if (!published) {
