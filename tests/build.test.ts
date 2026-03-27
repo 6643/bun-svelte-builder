@@ -1354,7 +1354,7 @@ test("buildSvelte rejects .mjs helpers that escape the app source tree", async (
 });
 
 test("buildSvelte rejects unsupported local source module extensions inside the app source tree", async () => {
-    for (const extension of [".jsx", ".mts"] as const) {
+    for (const extension of [".jsx", ".mts", ".d.ts"] as const) {
         const rootDir = mkdtempSync(join(process.cwd(), `.tmp-bsb-unsupported-local-source-${extension.slice(1)}-`));
         createdDirs.push(rootDir);
 
@@ -3823,7 +3823,7 @@ test("runConfiguredDevServer rejects .mjs helpers that escape the app source tre
 
 test("runConfiguredDevServer rejects unsupported local source module extensions at startup", async () =>
     runSequentialDevTest(async () => {
-    for (const extension of [".jsx", ".mts"] as const) {
+    for (const extension of [".jsx", ".mts", ".d.ts"] as const) {
         const devPort = await allocateFreePort();
         const rootDir = mkdtempSync(join(process.cwd(), `.tmp-bsb-dev-unsupported-local-source-${extension.slice(1)}-`));
         createdDirs.push(rootDir);
