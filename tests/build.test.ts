@@ -3266,6 +3266,54 @@ test("runConfiguredDevServer rejects relative imports that resolve outside the a
     expect(result.error).toContain("app source tree");
     }));
 
+test("runConfiguredDevServer rejects escaped relative imports introduced after startup", async () =>
+    runSequentialDevTest(async () => {
+    const devPort = await allocateFreePort();
+    const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-dev-runtime-relative-import-escape-"));
+    const outsideDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-dev-runtime-relative-import-escape-outside-"));
+    createdDirs.push(rootDir, outsideDir);
+
+    mkdirSync(join(rootDir, "src", "app"), { recursive: true });
+    mkdirSync(join(rootDir, "assets"), { recursive: true });
+    writeFileSync(join(rootDir, "src", "app", "App.svelte"), "<h1>safe</h1>");
+    writeFileSync(join(outsideDir, "escaped.js"), 'export const leaked = "outside-runtime-js";');
+    writeFileSync(
+        join(rootDir, "svelte-builder.config.json"),
+        JSON.stringify({ appComponent: "src/app/App.svelte", port: devPort }, null, 4),
+    );
+
+    const { runConfiguredDevServer } = await import("../src/index.ts");
+    const result = await runConfiguredDevServer(rootDir);
+
+    if (!result.ok) {
+        throw new Error(result.error);
+    }
+
+    try {
+        const escapedImport = relative(join(rootDir, "src", "app"), join(outsideDir, "escaped.js")).replaceAll("\\", "/");
+        writeFileSync(
+            join(rootDir, "src", "app", "App.svelte"),
+            [
+                "<script>",
+                `  import { leaked } from ${JSON.stringify(escapedImport)};`,
+                "</script>",
+                "",
+                "<h1>{leaked}</h1>",
+            ].join("\n"),
+        );
+
+        await new Promise((resolve) => setTimeout(resolve, 400));
+
+        const response = await requestDevServerPath(result.value.port, "/src/app/App.svelte");
+
+        expect(response.status).toBe(500);
+        expect(response.body).toBe("Internal Server Error");
+        expect(response.body).not.toContain("outside-runtime-js");
+    } finally {
+        await result.value.stop();
+    }
+    }));
+
 test("runConfiguredDevServer fails fast when the configured appComponent file is missing", async () =>
     runSequentialDevTest(async () => {
     const devPort = await allocateFreePort();
