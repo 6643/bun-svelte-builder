@@ -14,7 +14,7 @@ import {
     symlinkSync,
     writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import { createServer } from "node:net";
@@ -1107,6 +1107,42 @@ test("buildSvelte rejects appComponent symlinks that resolve outside the app sou
     expect(result.error).toMatch(/source tree|source directory|project root/i);
 });
 
+test("buildSvelte rejects relative imports that resolve outside the app source tree", async () => {
+    const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-relative-import-escape-"));
+    const outsideDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-relative-import-escape-outside-"));
+    createdDirs.push(rootDir, outsideDir);
+
+    mkdirSync(join(rootDir, "src", "app"), { recursive: true });
+    mkdirSync(join(rootDir, "assets"), { recursive: true });
+    const escapedImport = relative(join(rootDir, "src", "app"), join(outsideDir, "escaped.js")).replaceAll("\\", "/");
+
+    writeFileSync(
+        join(rootDir, "src", "app", "App.svelte"),
+        [
+            "<script>",
+            `  import { leaked } from ${JSON.stringify(escapedImport)};`,
+            "</script>",
+            "",
+            "<h1>{leaked}</h1>",
+        ].join("\n"),
+    );
+    writeFileSync(join(outsideDir, "escaped.js"), 'export const leaked = "outside-relative-js";');
+
+    const { buildSvelte } = await import("../src/index.ts");
+    const result = await buildSvelte({
+        appComponent: "src/app/App.svelte",
+        rootDir,
+    });
+
+    expect(result.ok).toBe(false);
+
+    if (result.ok) {
+        throw new Error("Expected buildSvelte to reject relative imports that escape the app source tree");
+    }
+
+    expect(result.error).toContain("app source tree");
+});
+
 test("buildSvelte rejects outDir that overlaps the broader source tree", async () => {
     const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-outdir-source-tree-"));
     createdDirs.push(rootDir);
@@ -1637,21 +1673,37 @@ test("buildProduction stale lock recovery restores rollback output before a late
     const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-stale-lock-rollback-restore-"));
     createdDirs.push(rootDir);
 
-    mkdirSync(join(rootDir, "src"), { recursive: true });
-    mkdirSync(join(rootDir, "assets"), { recursive: true });
+    writeRuntimeAwareFixture(rootDir);
     mkdirSync(join(rootDir, "dist.lock"), { recursive: true });
     mkdirSync(join(rootDir, ".dist.rollback-stale"), { recursive: true });
 
     writeFileSync(join(rootDir, ".dist.rollback-stale", "sentinel.txt"), "keep-me");
     writeFileSync(join(rootDir, "dist.lock", "owner.json"), JSON.stringify({ pid: 999999 }));
-    writeFileSync(join(rootDir, "src", "App.svelte"), "<script>let =</script>");
+    const actualFsPromises = await import("node:fs/promises");
+    let sawPublishRename = false;
 
-    const thrown = await buildProduction({ rootDir }).then(
-        () => null,
-        (error) => error,
-    );
+    mock.module("node:fs/promises", () => ({
+        ...actualFsPromises,
+        rename: async (from: string, to: string) => {
+            if (from.includes(".dist.bsp-out-") && to === join(rootDir, "dist")) {
+                sawPublishRename = true;
+                throw new Error("simulated publish rename failure");
+            }
 
-    expect(thrown).not.toBeNull();
+            renameSync(from, to);
+        },
+    }));
+
+    const buildModuleUrl = `${pathToFileURL(join(process.cwd(), "src", "build.ts")).href}?stale-rollback-restore=${Date.now()}`;
+    const { buildSvelte } = await import(buildModuleUrl);
+    const result = await buildSvelte({ rootDir });
+
+    expect(sawPublishRename).toBe(true);
+    expect(result.ok).toBe(false);
+
+    if (result.ok) {
+        throw new Error("Expected build to fail after stale rollback restoration when the final publish rename fails");
+    }
 
     expect(readFileSync(join(rootDir, "dist", "sentinel.txt"), "utf8")).toBe("keep-me");
     expect(existsSync(join(rootDir, ".dist.rollback-stale"))).toBe(false);
@@ -3299,6 +3351,43 @@ test("runConfiguredDevServer binds to localhost only", async () =>
     try {
         const localResponse = await fetch(`http://127.0.0.1:${result.value.port}/`);
         expect(localResponse.status).toBe(200);
+    } finally {
+        await result.value.stop();
+    }
+    }));
+
+test("runConfiguredDevServer rejects non-read methods for read-only routes", async () =>
+    runSequentialDevTest(async () => {
+    const devPort = await allocateFreePort();
+    const rootDir = mkdtempSync(join(process.cwd(), ".tmp-bsb-dev-read-only-methods-"));
+    createdDirs.push(rootDir);
+
+    writeConfiguredDevFixture(rootDir, { portLine: `    port: ${devPort},` });
+    writeFileSync(join(rootDir, "src", "helper.js"), 'export const helper = "safe";');
+
+    const { runConfiguredDevServer } = await import("../src/index.ts");
+    const result = await runConfiguredDevServer(rootDir);
+
+    if (!result.ok) {
+        throw new Error(result.error);
+    }
+
+    try {
+        for (const [method, pathname] of [
+            ["POST", "/"],
+            ["POST", "/src/helper.js"],
+            ["PUT", "/main.ts"],
+        ] as const) {
+            const response = await fetch(`http://127.0.0.1:${result.value.port}${pathname}`, {
+                method,
+                body: "x",
+            });
+            const body = await response.text();
+
+            expect(response.status).toBe(405);
+            expect(body).toBe("Method Not Allowed");
+            expect(response.headers.get("allow")).toBe("GET, HEAD");
+        }
     } finally {
         await result.value.stop();
     }
